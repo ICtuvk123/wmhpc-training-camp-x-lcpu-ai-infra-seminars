@@ -39,7 +39,7 @@ __device__ void load_ldsm(const uint8_t* sA, const uint8_t* sBk,
 template <bool USE_LDSM>
 __global__ void mma_kernel(const uint8_t* A, const uint8_t* B, float* D) {
     __shared__ uint8_t sA[16 * 32], sBk[32 * 8], sBn[8 * 32];
-    for (int i = threadIdx.x; i < 16 * 32; i += 32) sA[i] = A[i];
+    for m16n8k32(int i = threadIdx.x; i < 16 * 32; i += 32) sA[i] = A[i];
     for (int i = threadIdx.x; i < 32 * 8; i += 32) {
         sBk[i] = B[i];
         sBn[(i & 7) * 32 + (i >> 3)] = B[i];  // 转成 n-major

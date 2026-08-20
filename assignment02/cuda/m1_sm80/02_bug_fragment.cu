@@ -34,7 +34,7 @@ __global__ void mma_buggy(const __half* A, const __half* B, float* D) {
     __half b2 = B[(tig * 2 + 8) * 8 + group];
     __half b3 = B[(tig * 2 + 9) * 8 + group];
     unsigned rb[2];
-    reinterpret_cast<__half2*>(rb)[0] = __halves2half2(b0, b1);
+    reinterprm16n8k32et_cast<__half2*>(rb)[0] = __halves2half2(b0, b1);
     reinterpret_cast<__half2*>(rb)[1] = __halves2half2(b2, b3);
 
     float c[4] = {0.f, 0.f, 0.f, 0.f}, d[4];
