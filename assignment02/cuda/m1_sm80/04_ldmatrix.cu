@@ -23,23 +23,85 @@
 // 16 byte 连续,B 的 fragment 需要 k 方向相邻的字节成对进 b16——
 // 想清楚哪种布局能满足它。
 //
+
+__device__ __forceinline__
+unsigned pack4(const uint8_t* p) {
+    return static_cast<unsigned>(p[0])
+         | (static_cast<unsigned>(p[1]) << 8)
+         | (static_cast<unsigned>(p[2]) << 16)
+         | (static_cast<unsigned>(p[3]) << 24);
+}
+
 // TODO: 实现两个装载函数。
 __device__ void load_manual(const uint8_t* sA, const uint8_t* sBk,
                             const uint8_t* sBn, unsigned (&a)[4],
                             unsigned (&b)[2]) {
-    (void)sA; (void)sBk; (void)sBn; (void)a; (void)b;
+    int lane = threadIdx.x & 31;
+    int group = lane >> 2;
+    int tid4 = lane & 3;
+
+    // sA 逻辑布局为 [16][32]
+    a[0] = pack4(sA + group * 32 + tid4 * 4);
+    a[1] = pack4(sA + group * 32 + tid4 * 4 + 16);
+    a[2] = pack4(sA + (group + 8) * 32 + tid4 * 4);
+    a[3] = pack4(sA + (group + 8) * 32 + tid4 * 4 + 16);
+
+    // sBk 逻辑布局为 [32][8]，即 k-major
+    uint8_t tmp0[4];
+    uint8_t tmp1[4];
+
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        tmp0[i] = sBk[(tid4 * 4 + i) * 8 + group];
+        tmp1[i] = sBk[(tid4 * 4 + 16 + i) * 8 + group];
+    }
+
+    b[0] = pack4(tmp0);
+    b[1] = pack4(tmp1);
+
+    // sBn 在这条 k-major 手工路径中无需使用
+    (void)sBn;
 }
 
 __device__ void load_ldsm(const uint8_t* sA, const uint8_t* sBk,
                           const uint8_t* sBn, unsigned (&a)[4],
                           unsigned (&b)[2]) {
-    (void)sA; (void)sBk; (void)sBn; (void)a; (void)b;
+    int lane = threadIdx.x & 31;
+    int matrix_id = lane >> 3;    // lane / 8
+    int row = lane & 7;           // lane % 8
+
+    int row_block = matrix_id >> 1; // 0或1
+    int col_block = matrix_id & 1;  // 0或1
+    const uint8_t* A_raw = sA + (row_block * 8 + row) * 32 + col_block * 16;
+    uint32_t A_addr =
+        static_cast<uint32_t>(__cvta_generic_to_shared(A_raw));
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+        : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
+        : "r"(A_addr));
+
+    int matrix_id_B = (lane >> 3) & 1;
+    int row_B = lane & 7;
+
+    const uint8_t* B_raw =
+        sBn + row_B * 32 + matrix_id_B * 16;
+
+    uint32_t B_addr =
+        static_cast<uint32_t>(__cvta_generic_to_shared(B_raw));
+
+    asm volatile(
+        "ldmatrix.sync.aligned.m8n8.x2.shared.b16 "
+        "{%0, %1}, [%2];"
+        : "=r"(b[0]), "=r"(b[1])
+        : "r"(B_addr)
+    );
+    (void)sBk;
 }
 
 template <bool USE_LDSM>
 __global__ void mma_kernel(const uint8_t* A, const uint8_t* B, float* D) {
     __shared__ uint8_t sA[16 * 32], sBk[32 * 8], sBn[8 * 32];
-    for m16n8k32(int i = threadIdx.x; i < 16 * 32; i += 32) sA[i] = A[i];
+    for (int i = threadIdx.x; i < 16 * 32; i += 32) sA[i] = A[i];
     for (int i = threadIdx.x; i < 32 * 8; i += 32) {
         sBk[i] = B[i];
         sBn[(i & 7) * 32 + (i >> 3)] = B[i];  // 转成 n-major
