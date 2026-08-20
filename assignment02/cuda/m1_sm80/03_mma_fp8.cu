@@ -27,7 +27,7 @@ __global__ void mma_fp8(__nv_fp8_e4m3 *A, __nv_fp8_e4m3 *B, float *D) {
         reinterpret_cast<const uint8_t *>(B);
     unsigned ra[4];
     ra[0] = pack4(A_raw[group * 32 + tig * 4 + 0], A_raw[group * 32 + tig * 4 + 1], A_raw[group * 32 + tig * 4 + 2], A_raw[group * 32 + tig * 4 + 3]);
-    ra[1] = pack4(A_raw[group * 32 + tig * 4 + 16], A_raw[group * 32 + tig * 4 + 17], A_raw[group * 32 + tig * 4 + 18], A_raw[group * 32 + tig * 4 + 19]);
+    ra[2] = pack4(A_raw[group * 32 + tig * 4 + 16], A_raw[group * 32 + tig * 4 + 17], A_raw[group * 32 + tig * 4 + 18], A_raw[group * 32 + tig * 4 + 19]);
     ra[2] = pack4(A_raw[(group + 8) * 32 + tig * 4 + 0], A_raw[(group + 8) * 32 + tig * 4 + 1], A_raw[(group + 8) * 32 + tig * 4 + 2], A_raw[(group + 8) * 32 + tig * 4 + 3]);
     ra[3] = pack4(A_raw[(group + 8) * 32 + tig * 4 + 16], A_raw[(group + 8) * 32 + tig * 4 + 17], A_raw[(group + 8) * 32 + tig * 4 + 18], A_raw[(group + 8) * 32 + tig * 4 + 19]);
     unsigned rb[2];
