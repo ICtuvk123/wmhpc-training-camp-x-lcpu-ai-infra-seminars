@@ -21,6 +21,7 @@
 // 就是这三组)。运行:make run/m2_smem/02_descriptor(无卡可判)。
 #include <cstdio>
 #include <cstdint>
+#include <cassert>
 
 // TODO (a):实现位域编码。
 static uint64_t make_desc(uint32_t saddr, uint32_t lbo, uint32_t sbo,
@@ -48,7 +49,7 @@ static uint64_t make_desc(uint32_t saddr, uint32_t lbo, uint32_t sbo,
 static const uint32_t SCEN[3][3] = {
     {0x0080, 0x0400, 0},  // 场景 1
     {0, 0x0400, 0x0002},  // 场景 2
-    {0, 0x0080, 0x0002},  // 场景 3
+    {0, 0x0400, 0x0002},  // 场景 3
 };
 
 // 以下为判测,不需要修改。不匹配时按字段报差异,不打印期望值。
