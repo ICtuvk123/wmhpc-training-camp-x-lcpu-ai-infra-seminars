@@ -25,20 +25,22 @@
 // TODO (a):实现位域编码。
 static uint64_t make_desc(uint32_t saddr, uint32_t lbo, uint32_t sbo,
                           uint32_t layout) {
-    assert((start_address & 0xF) == 0); // 16B aligned
-    assert((LBO           & 0xF) == 0);
-    assert((SBO           & 0xF) == 0);
+    assert((saddr & 0xF) == 0); // 16B aligned
+    assert((lbo           & 0xF) == 0);
+    assert((sbo           & 0xF) == 0);
 
-    assert((start_address >> 4) < (1ULL << 15));
-    assert((LBO           >> 4) < (1ULL << 15));
-    assert((SBO           >> 4) < (1ULL << 15));
+    assert((saddr >> 4) < (1ULL << 15));
+    assert((lbo           >> 4) < (1ULL << 15));
+    assert((sbo           >> 4) < (1ULL << 15));
 
-    assert(layout_type < 8); // 3-bit field
+    assert(layout < 8); // 3-bit field
     //  desc |= ((start_address >> 4) & 0x7FFFULL) << 0;
-    desc |= ((LBO           >> 4) & 0x7FFFULL) << 16;
-    desc |= ((SBO           >> 4) & 0x7FFFULL) << 32;
+    uint64_t desc = 0;
+    desc |= ((uint64_t)(saddr >> 4) & 0x7FFFULL) << 0;
+    desc |= ((uint64_t)(lbo   >> 4) & 0x7FFFULL) << 16;
+    desc |= ((uint64_t)(sbo   >> 4) & 0x7FFFULL) << 32;
     desc |= (1ULL & 0x3ULL) << 46;
-    desc |= (layout_type & 0x7ULL) << 61;
+    desc |= (layout & 0x7ULL) << 61;
     return desc;
 }
 
