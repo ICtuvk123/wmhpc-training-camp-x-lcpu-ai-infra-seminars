@@ -25,15 +25,28 @@
 // TODO (a):实现位域编码。
 static uint64_t make_desc(uint32_t saddr, uint32_t lbo, uint32_t sbo,
                           uint32_t layout) {
-    (void)saddr; (void)lbo; (void)sbo; (void)layout;
-    return 0;
+    assert((start_address & 0xF) == 0); // 16B aligned
+    assert((LBO           & 0xF) == 0);
+    assert((SBO           & 0xF) == 0);
+
+    assert((start_address >> 4) < (1ULL << 15));
+    assert((LBO           >> 4) < (1ULL << 15));
+    assert((SBO           >> 4) < (1ULL << 15));
+
+    assert(layout_type < 8); // 3-bit field
+    //  desc |= ((start_address >> 4) & 0x7FFFULL) << 0;
+    desc |= ((LBO           >> 4) & 0x7FFFULL) << 16;
+    desc |= ((SBO           >> 4) & 0x7FFFULL) << 32;
+    desc |= (1ULL & 0x3ULL) << 46;
+    desc |= (layout_type & 0x7ULL) << 61;
+    return desc;
 }
 
 // TODO (b):三个场景的 {LBO 字节, SBO 字节, layout 编码}。
 static const uint32_t SCEN[3][3] = {
-    {0, 0, 0},  // 场景 1
-    {0, 0, 0},  // 场景 2
-    {0, 0, 0},  // 场景 3
+    {0x0080, 0x0400, 0},  // 场景 1
+    {0, 0x0400, 0x0002},  // 场景 2
+    {0, 0x0080, 0x0002},  // 场景 3
 };
 
 // 以下为判测,不需要修改。不匹配时按字段报差异,不打印期望值。

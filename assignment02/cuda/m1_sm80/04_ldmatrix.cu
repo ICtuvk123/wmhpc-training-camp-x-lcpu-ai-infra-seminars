@@ -42,8 +42,8 @@ __device__ void load_manual(const uint8_t* sA, const uint8_t* sBk,
 
     // sA 逻辑布局为 [16][32]
     a[0] = pack4(sA + group * 32 + tid4 * 4);
-    a[1] = pack4(sA + group * 32 + tid4 * 4 + 16);
-    a[2] = pack4(sA + (group + 8) * 32 + tid4 * 4);
+    a[2] = pack4(sA + group * 32 + tid4 * 4 + 16);
+    a[1] = pack4(sA + (group + 8) * 32 + tid4 * 4);
     a[3] = pack4(sA + (group + 8) * 32 + tid4 * 4 + 16);
 
     // sBk 逻辑布局为 [32][8]，即 k-major
@@ -70,8 +70,8 @@ __device__ void load_ldsm(const uint8_t* sA, const uint8_t* sBk,
     int matrix_id = lane >> 3;    // lane / 8
     int row = lane & 7;           // lane % 8
 
-    int row_block = matrix_id >> 1; // 0或1
-    int col_block = matrix_id & 1;  // 0或1
+    int row_block = matrix_id & 1; // 0或1
+    int col_block = matrix_id >> 1;  // 0或1
     const uint8_t* A_raw = sA + (row_block * 8 + row) * 32 + col_block * 16;
     uint32_t A_addr =
         static_cast<uint32_t>(__cvta_generic_to_shared(A_raw));
