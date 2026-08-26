@@ -80,24 +80,24 @@ __global__ void tcgen05_tile(const __nv_bfloat16* gA,
     constexpr int NUM_TMEM_COLS = N;
     
     if (tid == 0) {
-        asm volatile("mbarrier.init.shared::cta.b64 [%0],%1;"::"r"(mbar_u32,"r"(1));
-        asm volatile("fence.mbarrier_init.release.cluster;");
+        asm volatile("mbarrier.init.shared::cta.b64 [%0],%1;"::"r"(mbar_u32),"r"(1): "memory");
+        asm volatile("fence.mbarrier_init.release.cluster;":::"memory");
     }
     
     if (warp == 0) {
-        asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0],%1;"::"r"(taddr_smem,"r"(NUM_TMEM_COLS)::"memory");
+        asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0],%1;"::"r"(taddr_smem,"r"(NUM_TMEM_COLS):"memory");
     } 
     
     __syncthreads();
-    uint32_t taddr = taddr_smem;
+    uint32_t taddr = s_taddr[0];
 
     constexpr int A_BYTES = M * K * sizeof(__nv_bfloat16);
     constexpr int B_BYTES = N * K * sizeof(__nv_bfloat16);
 
     __shared__ __align__(1024)
         unsigned char smem[A_BYTES + B_BYTES];
-    const unsigned char* sA = smem;
-    const unsigned char* sB = smem + A_BYTES;
+    unsigned char* sA = smem;
+    unsigned char* sB = smem + A_BYTES;
 
     const unsigned char* gA_bytes = reinterpret_cast<const unsigned char*>(gA); 
     const unsigned char* gB_bytes = reinterpret_cast<const unsigned char*>(gB);
