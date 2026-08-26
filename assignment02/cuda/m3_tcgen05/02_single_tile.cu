@@ -85,7 +85,7 @@ __global__ void tcgen05_tile(const __nv_bfloat16* gA,
     }
     
     if (warp == 0) {
-        asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0],%1;"::"r"(taddr_smem,"r"(NUM_TMEM_COLS):"memory");
+        asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0],%1;"::"r"(taddr_smem),"r"(NUM_TMEM_COLS):"memory");
     } 
     
     __syncthreads();
