@@ -109,7 +109,7 @@ __global__ void tcgen05_tile(const __nv_bfloat16* gA, const __nv_bfloat16* gB,
                 "{\n.reg .pred p;\nsetp.ne.b32 p, %4, 0;\n"
                 "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, p;\n}\n" ::
                     "r"(taddr),
-                "l"(da), "l"(db), "r"(idesc), "r"((uint32_t)round != 0));
+                "l"(da), "l"(db), "r"(idesc), "r"((uint32_t)(round != 0)));
             asm volatile(
                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one"
                 ".shared::cluster.b64 [%0];" ::"r"(mbar_u32)
