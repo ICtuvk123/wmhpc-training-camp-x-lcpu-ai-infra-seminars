@@ -89,6 +89,7 @@ __global__ void tcgen05_tile(const __nv_bfloat16* gA, const __nv_bfloat16* gB,
     // 每轮:一条 k16 mma(不累加,D = 本轮部分积)-> commit -> wait ->
     // 各 warp 读回自己的 lane,在寄存器里累加。ROUNDS 由 host 传入。
     uint32_t elected;
+    uint32_t phase = 0;
     asm volatile(
         "{\n.reg .pred P;\nelect.sync _|P, 0xFFFFFFFF;\nselp.b32 %0, 1, 0, "
         "P;\n}"
@@ -108,13 +109,14 @@ __global__ void tcgen05_tile(const __nv_bfloat16* gA, const __nv_bfloat16* gB,
                 "{\n.reg .pred p;\nsetp.ne.b32 p, %4, 0;\n"
                 "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, p;\n}\n" ::
                     "r"(taddr),
-                "l"(da), "l"(db), "r"(idesc), "r"(0));
+                "l"(da), "l"(db), "r"(idesc), "r"(round != 0));
             asm volatile(
                 "tcgen05.commit.cta_group::1.mbarrier::arrive::one"
                 ".shared::cluster.b64 [%0];" ::"r"(mbar_u32)
                 : "memory");
         }
-        mbar_wait(mbar_u32, 0);
+        mbar_wait(mbar_u32, phase);
+        phase ^= 1;
         asm volatile("tcgen05.fence::after_thread_sync;");
         for (int c = 0; c < N; c += 8) {
             uint32_t src = taddr + ((uint32_t)(warp * 32) << 16) + c;
