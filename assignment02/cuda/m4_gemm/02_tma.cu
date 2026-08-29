@@ -122,7 +122,7 @@ __global__ void gemm_tma(const __nv_bfloat16 *gA, const __nv_bfloat16 *gB,
     // 按 swz128 布局 st.shared 进 smem(即 3.2 的 staging,行列起点换成 tile
     // 偏移) 由TMA 完成
     // issue four m128n64k16 tcgen05.mma
-    if (it != 0)) {
+    if (it != 0) {
       mbar_wait(mbar_u32,((it - 1) & 1));
     }
 
