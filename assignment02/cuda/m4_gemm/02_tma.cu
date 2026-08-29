@@ -317,7 +317,41 @@ int main(int argc, char **argv) {
   // TODO:cuTensorMapEncodeTiled 建 tmapA/tmapB(参数要点见文件头;
   // 返回值要检查,CUDA_SUCCESS 之外一律报错退出——tensor map 参数错
   // 的典型症状是 kernel 静默读到 0 或越界,而不是启动失败)。
-  CUtensorMap tmapA = {}, tmapB = {};
+  alignas(64) CUtensorMap tmapA{};
+  alignas(64) CUtensorMap tmapB{};
+
+  cuuint64_t globalDimA[2] = {
+      (cuuint64_t)K,
+      (cuuint64_t)M
+  };
+
+  cuuint64_t globalStrideA[1] = {
+      (cuuint64_t)K * sizeof(__nv_bfloat16)
+  };
+
+  cuuint32_t boxDimA[2] = {
+      BK,
+      BM
+  };
+
+  cuuint32_t elementStrideA[2] = {
+      1, 1
+  };
+
+  CUresult retA = cuTensorMapEncodeTiled(
+      &tmapA,
+      CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+      2,
+      dA,
+      globalDimA,
+      globalStrideA,
+      boxDimA,
+      elementStrideA,
+      CU_TENSOR_MAP_INTERLEAVE_NONE,
+      CU_TENSOR_MAP_SWIZZLE_128B,
+      CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+  );
 
   dim3 grid(M / BM, N / BN);
   size_t smemBytes = (size_t)(BM + BN) * BK * 2 + 1024;
