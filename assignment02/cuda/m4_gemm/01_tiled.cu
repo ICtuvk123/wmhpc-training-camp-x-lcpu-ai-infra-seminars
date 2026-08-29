@@ -262,6 +262,7 @@ __global__ void gemm_tiled(const __nv_bfloat16* gA, const __nv_bfloat16* gB,
             ::
             "r"(taddr),
             "r"(NUM_TMEM_COLS));
+    }
 }
 
 int main(int argc, char** argv) {
