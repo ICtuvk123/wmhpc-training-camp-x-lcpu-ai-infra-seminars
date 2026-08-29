@@ -255,6 +255,13 @@ __global__ void gemm_tma(const __nv_bfloat16 *gA, const __nv_bfloat16 *gB,
 
   }
 
+  int num_it = K / BK;
+
+  mbar_wait(
+      mbar_u32,
+      (uint32_t)((num_it - 1) & 1)
+  );
+
   asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
 
   int row = warp * 32 + lane;
