@@ -63,7 +63,6 @@ __global__ void gemm_tiled(const __nv_bfloat16* gA, const __nv_bfloat16* gB,
     extern __shared__ uint8_t smem_raw[];
     uint8_t* smem =
         (uint8_t*)(((uintptr_t)smem_raw + 1023) & ~(uintptr_t)1023);
-
     // TODO:在你 3.2 的实现基础上扩展。结构:
     // (1) mbarrier 初始化 + TMEM 分配(与 3.2 相同,整段沿用)
     // (2) 本 block 的输出 tile:tileM = blockIdx.x*BM, tileN = blockIdx.y*BN
@@ -81,7 +80,188 @@ __global__ void gemm_tiled(const __nv_bfloat16* gA, const __nv_bfloat16* gB,
     //         小 K 可能侥幸通过,大 K 会读到被覆写的数据
     // (4) epilogue 与 3.2 相同,写回 gD 的 (tileM, tileN) 块(行跨度 N)
     // (5) dealloc
-    (void)gA; (void)gB; (void)gD; (void)M; (void)N; (void)K; (void)smem;
+   
+    int tid  = threadIdx.x;
+    int warp = tid >> 5;
+    int lane = tid & 31;
+
+    __shared__ uint32_t s_taddr[1];
+    __shared__ __align__(8)
+        uint64_t mbar[1];
+
+    uint32_t taddr_smem = (uint32_t)__cvta_generic_to_shared(s_taddr);
+    uint32_t mbar_u32 = (uint32_t)__cvta_generic_to_shared(mbar);
+
+    constexpr int NUM_TMEM_COLS = BN;
+    
+    if (tid == 0) {
+        asm volatile("mbarrier.init.shared::cta.b64 [%0],%1;"::"r"(mbar_u32),"r"(1): "memory");
+        asm volatile("fence.mbarrier_init.release.cluster;":::"memory");
+    }
+    
+    if (warp == 0) {
+        asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0],%1;"::"r"(taddr_smem),"r"(NUM_TMEM_COLS):"memory");
+    } 
+    
+    __syncthreads();
+    uint32_t taddr = s_taddr[0];
+
+    int tileM = blockIdx.x * BM;
+    int tileN = blockIdx.y * BN;
+
+    constexpr int A_BYTES = BM * BK * sizeof(__nv_bfloat16);
+    constexpr int B_BYTES = BN * BK * sizeof(__nv_bfloat16);
+
+    uint8_t* sA = smem;
+    uint8_t* sB = smem + A_BYTES;
+
+    for (int it = 0; it < K / BK; it++) {
+        // 全体线程把 A 的 (tileM, it*BK) 块、B 的 (tileN, it*BK) 块
+        // 按 swz128 布局 st.shared 进 smem(即 3.2 的 staging,行列起点换成 tile 偏移)
+        // 由TMA 完成
+        for (int i = tid; i < BM * BK; i += blockDim.x) {
+            int row = i / BK, col = i % BK;
+            *reinterpret_cast<__nv_bfloat16*>(&sA[swz128(row, col * 2)]) = gA[(tileM + row) * K + it * BK + col];
+        }
+        for (int i = tid; i < BN * BK; i += blockDim.x) {
+            int row = i / BK, col = i % BK;
+            *reinterpret_cast<__nv_bfloat16*>(&sB[swz128(row, col * 2)]) = gB[(tileN + row) * K + it * BK + col];
+        }
+        asm volatile(
+            "fence.proxy.async.shared::cta;"
+            ::: "memory");
+        __syncthreads();
+        // issue four m128n64k16 tcgen05.mma
+        constexpr uint32_t IDESC =
+              (1u << 4)
+            | (1u << 7)
+            | (1u << 10)
+            | ((uint32_t)(BN >> 3) << 17)
+            | ((uint32_t)(BM >> 4) << 24);
+        if (tid == 0) {
+            uint32_t sA_addr = (uint32_t)__cvta_generic_to_shared(sA);
+            uint32_t sB_addr = (uint32_t)__cvta_generic_to_shared(sB);
+
+            uint64_t descA0 = make_desc_sm100(sA_addr + 0, 0, 1024, 2);
+            uint64_t descA1 = make_desc_sm100(sA_addr + 32, 0, 1024, 2);
+            uint64_t descA2 = make_desc_sm100(sA_addr + 64, 0, 1024, 2);
+            uint64_t descA3 = make_desc_sm100(sA_addr + 96, 0, 1024, 2);
+            uint64_t descB0 = make_desc_sm100(sB_addr + 0, 0, 1024, 2);
+            uint64_t descB1 = make_desc_sm100(sB_addr + 32, 0, 1024, 2);
+            uint64_t descB2 = make_desc_sm100(sB_addr + 64, 0, 1024, 2);
+            uint64_t descB3 = make_desc_sm100(sB_addr + 96, 0, 1024, 2);
+
+            {
+                uint32_t accumulate = (uint32_t)(!(it == 0));
+                asm volatile("{\n"
+                             "  .reg .pred p;\n"
+                             "  setp.ne.u32 p, %4, 0;\n"
+                             "  tcgen05.mma.cta_group::1.kind::f16 "
+                             "    [%0], %1, %2, %3, p;\n"
+                             "}\n"
+                             :
+                             : "r"(taddr),
+                               "l"(descA0),
+                               "l"(descB0),
+                               "r"(IDESC),
+                               "r"(accumulate)
+                             : "memory");
+            }
+
+            {
+                uint32_t accumulate = 1;
+                asm volatile("{\n"
+                             "  .reg .pred p;\n"
+                             "  setp.ne.u32 p, %4, 0;\n"
+                             "  tcgen05.mma.cta_group::1.kind::f16 "
+                             "    [%0], %1, %2, %3, p;\n"
+                             "}\n"
+                             :
+                             : "r"(taddr),
+                               "l"(descA1),
+                               "l"(descB1),
+                               "r"(IDESC),
+                               "r"(accumulate)
+                             : "memory");
+            }
+
+            {
+                uint32_t accumulate = 1;
+                asm volatile("{\n"
+                             "  .reg .pred p;\n"
+                             "  setp.ne.u32 p, %4, 0;\n"
+                             "  tcgen05.mma.cta_group::1.kind::f16 "
+                             "    [%0], %1, %2, %3, p;\n"
+                             "}\n"
+                             :
+                             : "r"(taddr),
+                               "l"(descA2),
+                               "l"(descB2),
+                               "r"(IDESC),
+                               "r"(accumulate)
+                             : "memory");
+            }
+            
+            {
+                uint32_t accumulate = 1;
+                asm volatile("{\n"
+                             "  .reg .pred p;\n"
+                             "  setp.ne.u32 p, %4, 0;\n"
+                             "  tcgen05.mma.cta_group::1.kind::f16 "
+                             "    [%0], %1, %2, %3, p;\n"
+                             "}\n"
+                             :
+                             : "r"(taddr),
+                               "l"(descA3),
+                               "l"(descB3),
+                               "r"(IDESC),
+                               "r"(accumulate)
+                             : "memory");
+            }
+
+            asm volatile("tcgen05.commit.cta_group::1.""mbarrier::arrive::one.shared::cluster.b64 [%0];":: "r"(mbar_u32):"memory");
+        }
+        
+        mbar_wait(mbar_u32,((uint32_t)(it & 1)));
+    } 
+
+    asm volatile("tcgen05.fence::after_thread_sync;"::: "memory");
+
+    int row = warp * 32 + lane;
+
+    for (int c = 0; c < BN; c += 8) {
+
+        uint32_t src =
+            taddr
+            + ((uint32_t)(warp * 32) << 16)
+            + c;
+
+        float r[8];
+
+        asm volatile(
+            "tcgen05.ld.sync.aligned.32x32b.x8.b32 "
+            "{%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+            : "=f"(r[0]), "=f"(r[1]), "=f"(r[2]), "=f"(r[3]),
+              "=f"(r[4]), "=f"(r[5]), "=f"(r[6]), "=f"(r[7])
+            : "r"(src));
+
+        asm volatile("tcgen05.wait::ld.sync.aligned;");
+
+#pragma unroll
+        for (int i = 0; i < 8; i++) {
+            gD[(tileM + row) * N
+               + tileN + c + i] = r[i];
+        }
+    }
+
+    __syncthreads();
+
+    if (warp == 0) {
+        asm volatile(
+            "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
+            ::
+            "r"(taddr),
+            "r"(NUM_TMEM_COLS));
 }
 
 int main(int argc, char** argv) {
