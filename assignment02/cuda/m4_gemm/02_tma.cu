@@ -353,6 +353,38 @@ int main(int argc, char **argv) {
       CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
   );
 
+  cuuint64_t globalDimB[2] = {
+      (cuuint64_t)K,
+      (cuuint64_t)N
+  };
+
+  cuuint64_t globalStrideB[1] = {
+      (cuuint64_t)K * sizeof(__nv_bfloat16)
+  };
+
+  cuuint32_t boxDimB[2] = {
+      BK,
+      BN
+  };
+
+  cuuint32_t elementStrideB[2] = {
+      1, 1
+  };
+
+  CUresult retB = cuTensorMapEncodeTiled(
+      &tmapB,
+      CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+      2,
+      dB,
+      globalDimB,
+      globalStrideB,
+      boxDimB,
+      elementStrideB,
+      CU_TENSOR_MAP_INTERLEAVE_NONE,
+      CU_TENSOR_MAP_SWIZZLE_128B,
+      CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE
+  );
   dim3 grid(M / BM, N / BN);
   size_t smemBytes = (size_t)(BM + BN) * BK * 2 + 1024;
   CUDA_CHECK(cudaFuncSetAttribute(
