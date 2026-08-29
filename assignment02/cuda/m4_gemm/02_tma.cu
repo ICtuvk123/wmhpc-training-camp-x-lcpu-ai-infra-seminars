@@ -127,9 +127,10 @@ __global__ void gemm_tma(const __nv_bfloat16 *gA, const __nv_bfloat16 *gB,
     }
 
     if (tid == 0) {
-      asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 [%0],%1;" ::"r"(mbar_full),
-                 "r"(TMA_BYTES)
-                 : "memory");
+      asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64" "_ [%0],%1;" ::
+                   "r"(mbar_full),
+                   "r"((it & 1))
+                   : "memory");
 
       uint32_t sA_addr =
           (uint32_t)__cvta_generic_to_shared(sA);
