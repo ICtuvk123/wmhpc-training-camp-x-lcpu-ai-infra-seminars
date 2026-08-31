@@ -26,16 +26,20 @@ def quant_dequant_per_tensor(x: torch.Tensor) -> torch.Tensor:
     TODO: 实现。步骤:算 scale = amax / 448;除 scale 后 cast 到
     torch.float8_e4m3fn;cast 回 float 再乘 scale。
     """
-    raise NotImplementedError
-
+    amax = x.abs().amax()
+    scale = amax / E4M3_MAX
+    q = (x / scale).to(torch.float8_e4m3fn)
+    y = q.float() * scale
+    return y
 
 def rel_err_at(x: torch.Tensor, y: torch.Tensor, value: float) -> float:
     """取 x 中最接近 value 的元素,返回该点的相对误差。
 
     TODO: 实现(表格的每一格都从这里来)。
     """
-    raise NotImplementedError
-
+    idx = torch.argmin(torch.abs(x - value))
+    rel_err = torch.abs(y[idx] - value) / value
+    return rel_err.item()
 
 def main() -> None:
     x = build_tensor()
