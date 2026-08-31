@@ -37,7 +37,7 @@ def gemm_scale_per_row_col(A: torch.Tensor, B: torch.Tensor,
     在输出 [M, N] 上乘回 scale 乘积。
     """
     A_norm = A / sA[:, None]
-    B_norm = B / sB[None, :]
+    B_norm = B / sB[:, None]
 
     C_norm = A_norm.to(torch.float64) @ B_norm.T.to(torch.float64)
     return C_norm * sA[:, None].to(torch.float64) * sB[None, :].to(torch.float64)
