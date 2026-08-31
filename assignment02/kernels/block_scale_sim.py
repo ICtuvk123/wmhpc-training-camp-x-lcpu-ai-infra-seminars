@@ -60,7 +60,7 @@ def gemm_scale_along_k(A: torch.Tensor, B: torch.Tensor,
         sA_seg = sA[:, i]
         sB_seg = sB[:, i]
         A_norm = A_seg / sA_seg[:, None]
-        B_norm = B_seg / sB_seg[None, :]
+        B_norm = B_seg / sB_seg[:, None]
         
         partial = (A_norm.to(torch.float64) @ B_norm.T.to(torch.float64))
         partial *= sA_seg[:, None].to(torch.float64) * sB_seg[None, :].to(torch.float64)
