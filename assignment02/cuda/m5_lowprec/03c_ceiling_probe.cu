@@ -19,13 +19,63 @@ template <int BLOCK>
 __global__ void probe_kernel(const __nv_bfloat16* __restrict__ in,
                              uint8_t* __restrict__ dataOut,
                              uint8_t* __restrict__ sfOut, int M, int K) {
-    // TODO: 与你的 quant kernel 同形的访存,xor 直通,无数学。
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int groupsPerRow = K / 16;
+    int totalGroups = M * groupsPerRow;
+
+    if (tid >= totalGroups)
+        return;
+
+    int row = tid / groupsPerRow;
+    int g = tid % groupsPerRow;
+
+    int offset = row * K + g * 16;
+
+    const uint16_t* in16 =
+        reinterpret_cast<const uint16_t*>(in);
+
+    uint8_t acc = 0;
+
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        uint16_t x = in16[offset + i];
+
+        acc ^= static_cast<uint8_t>(x);
+        acc ^= static_cast<uint8_t>(x >> 8);
+    }
+
+    int outBase = row * (K / 2) + g * 8;
+
+    #pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        dataOut[outBase + i] = acc;
+    }
+
+    int numKTiles = nvfp4_num_ktiles(K);
+
+    sfOut[
+        sf_swizzled_offset(row, g, numKTiles)
+    ] = acc;
 }
 
 static void launch_probe(const __nv_bfloat16* in, uint8_t* dataOut,
                          uint8_t* sfOut, int M, int K, int sms) {
     // TODO: 启动配置。
-    (void)in; (void)dataOut; (void)sfOut; (void)M; (void)K; (void)sms;
+    constexpr int BLOCK = 256;
+
+    int totalGroups = M * (K / 16);
+    int grid = (totalGroups + BLOCK - 1) / BLOCK;
+
+    probe_kernel<BLOCK><<<grid, BLOCK>>>(
+        in,
+        dataOut,
+        sfOut,
+        M,
+        K
+    );
+
+    (void)sms;
 }
 
 int main() {
