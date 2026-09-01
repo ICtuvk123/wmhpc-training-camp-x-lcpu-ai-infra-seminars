@@ -26,6 +26,14 @@
 #include "e2m1_encode.h"
 #include "nvfp4_quant_kernel.h"
 
+#ifndef FUSED_BLOCK
+#define FUSED_BLOCK 256
+#endif
+
+#ifndef FUSED_GRID_MUL
+#define FUSED_GRID_MUL 2
+#endif
+
 // 给定的两步基线第一步:block-per-row 的 rms_norm,bf16 进出。
 // 允许修改或另写(公平基线的一部分:它调多快,对比就有多可信)。
 template <int BLOCK>
@@ -201,10 +209,8 @@ static void launch_fused(
     float eps,
     int sms
 ) {
-    constexpr int BLOCK = 256;
-
-    int grid = M < sms * 2 ? M : sms * 2;
-
+    constexpr int BLOCK = FUSED_BLOCK;
+    int grid = min(M, sms * FUSED_GRID_MUL);
     fused_rms_nvfp4_kernel<BLOCK><<<grid, BLOCK>>>(
         in,
         w,
