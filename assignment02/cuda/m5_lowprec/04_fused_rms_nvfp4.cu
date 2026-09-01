@@ -189,6 +189,33 @@ __global__ void fused_rms_nvfp4_kernel(
         __syncthreads();
     }
 }
+
+
+static void launch_fused(
+    const __nv_bfloat16* in,
+    const __nv_bfloat16* w,
+    uint8_t* dataOut,
+    uint8_t* sfOut,
+    int M,
+    int K,
+    float eps,
+    int sms
+) {
+    constexpr int BLOCK = 256;
+
+    int grid = M < sms * 2 ? M : sms * 2;
+
+    fused_rms_nvfp4_kernel<BLOCK><<<grid, BLOCK>>>(
+        in,
+        w,
+        dataOut,
+        sfOut,
+        M,
+        K,
+        eps
+    );
+}
+
 // TODO(公平基线):两步各自的最优启动配置。默认给的是一个起点。
 static void launch_two_step(const __nv_bfloat16* in, const __nv_bfloat16* w,
                             __nv_bfloat16* mid, uint8_t* dataOut,
