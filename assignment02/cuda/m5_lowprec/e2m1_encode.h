@@ -18,19 +18,19 @@ __host__ __device__ inline uint8_t e2m1_encode(float v) {
     // TODO: 实现。返回 4 bit 编码(bit3 符号,bit0-2 幅值格点下标)。
     uint8_t sign = signbit(v) ? 0x8 : 0x0;
     float abs_v = fabsf(v);
-    if (abs_v < 0.25) {
+    if (abs_v <= 0.25) {
         return sign | 0x0;
     } else if (abs_v < 0.75) {
         return sign | 0x1;
-    } else if (abs_v < 1.25) {
+    } else if (abs_v <= 1.25) {
         return sign | 0x2;
     } else if (abs_v < 1.75) {
         return sign | 0x3;
-    } else if (abs_v < 2.5) {
+    } else if (abs_v <= 2.5) {
         return sign | 0x4;
     } else if (abs_v < 3.5) {
         return sign | 0x5;
-    } else if (abs_v < 5.0) {
+    } else if (abs_v <= 5.0) {
         return sign | 0x6;
     }
     return sign | 0x7;
