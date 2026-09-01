@@ -82,15 +82,113 @@ __global__ void rms_norm_baseline_kernel(const __nv_bfloat16* __restrict__ in,
     }
 }
 
-// TODO(核心):融合 kernel。签名自定,在 launch_fused 里接上。
-static void launch_fused(const __nv_bfloat16* in, const __nv_bfloat16* w,
-                         uint8_t* dataOut, uint8_t* sfOut, int M, int K,
-                         float eps, int sms) {
-    // TODO
-    (void)in; (void)w; (void)dataOut; (void)sfOut; (void)M; (void)K;
-    (void)eps; (void)sms;
-}
+template <int BLOCK>
+__global__ void fused_rms_nvfp4_kernel(
+    const __nv_bfloat16* __restrict__ in,
+    const __nv_bfloat16* __restrict__ w,
+    uint8_t* __restrict__ dataOut,
+    uint8_t* __restrict__ sfOut,
+    int M,
+    int K,
+    float eps) {
+    __shared__ float red[BLOCK / 32];
+    for (int row = blockIdx.x; row < M; row += gridDim.x) {
+        const __nv_bfloat16* xr =
+            in + (size_t)row * K;
+        float ss = 0.f;
+        for (int k = threadIdx.x * 8;
+             k < K;
+             k += BLOCK * 8) {
+            float4 raw =
+                *reinterpret_cast<const float4*>(xr + k);
+            const __nv_bfloat162* h =
+                reinterpret_cast<const __nv_bfloat162*>(&raw);
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+                float2 f = __bfloat1622float2(h[i]);
+                ss += f.x * f.x + f.y * f.y;
+            }
+        }
 
+#pragma unroll
+        for (int o = 16; o; o >>= 1) {
+            ss += __shfl_down_sync(~0u, ss, o);
+        }
+        if ((threadIdx.x & 31) == 0) {
+            red[threadIdx.x >> 5] = ss;
+        }
+        __syncthreads();
+        if (threadIdx.x < 32) {
+            ss = threadIdx.x < BLOCK / 32
+                     ? red[threadIdx.x]
+                     : 0.f;
+#pragma unroll
+            for (int o = 16; o; o >>= 1) {
+                ss += __shfl_down_sync(~0u, ss, o);
+            }
+            if (threadIdx.x == 0) {
+                red[0] = ss;
+            }
+        }
+        __syncthreads();
+        float rnorm =
+            1.0f / sqrtf(red[0] / K + eps);
+        int groups_per_row = K / NVFP4_GROUP;
+        int numKTiles = nvfp4_num_ktiles(K);
+        for (int g = threadIdx.x;
+             g < groups_per_row;
+             g += BLOCK) {
+            float vals[NVFP4_GROUP];
+            float amax = 0.f;
+            int kBase = g * NVFP4_GROUP;
+#pragma unroll
+            for (int i = 0; i < NVFP4_GROUP; ++i) {
+                int k = kBase + i;
+                float x =
+                    __bfloat162float(xr[k]);
+                float ww =
+                    __bfloat162float(w[k]);
+                float v =
+                    x * rnorm * ww;
+                vals[i] = v;
+                amax =
+                    fmaxf(amax, fabsf(v));
+            }
+            __nv_fp8_e4m3 sf8(
+                amax / 6.0f
+            );
+            float sf = float(sf8);
+            float inv =
+                sf != 0.f
+                    ? 1.0f / sf
+                    : 0.f;
+#pragma unroll
+            for (int i = 0;
+                 i < NVFP4_GROUP;
+                 i += 2) {
+                float2 pair =
+                    make_float2(
+                        vals[i] * inv,
+                        vals[i + 1] * inv
+                    );
+                __nv_fp4x2_e2m1 q(pair);
+                dataOut[
+                    (size_t)row * (K / 2)
+                    + g * 8
+                    + i / 2
+                ] = q.__x;
+            }
+            sfOut[
+                sf_swizzled_offset(
+                    row,
+                    g,
+                    numKTiles
+                )
+            ] = sf8.__x;
+        }
+        __syncthreads();
+    }
+}
 // TODO(公平基线):两步各自的最优启动配置。默认给的是一个起点。
 static void launch_two_step(const __nv_bfloat16* in, const __nv_bfloat16* w,
                             __nv_bfloat16* mid, uint8_t* dataOut,
