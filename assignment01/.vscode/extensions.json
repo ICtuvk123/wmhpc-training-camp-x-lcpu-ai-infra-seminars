@@ -1,0 +1,8 @@
+{
+  "recommendations": [
+    "NVIDIA.nsight-vscode-edition",
+    "ms-vscode.cpptools",
+    "ms-python.python",
+    "ms-python.vscode-pylance"
+  ]
+}

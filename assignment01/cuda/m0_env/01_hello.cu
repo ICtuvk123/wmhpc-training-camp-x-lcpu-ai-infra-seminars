@@ -9,5 +9,7 @@ __global__ void hello() {
 int main() {
     hello<<<4, 8>>>();
     CUDA_CHECK_KERNEL();
-    return 0;
+    return 0
 }
+
+

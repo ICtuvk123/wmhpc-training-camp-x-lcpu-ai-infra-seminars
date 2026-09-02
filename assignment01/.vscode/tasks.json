@@ -1,0 +1,148 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "检查 CUDA：编译当前文件",
+      "type": "process",
+      "command": "nvcc",
+      "args": [
+        "-std=c++17",
+        "-arch=sm_75",
+        "-I${workspaceFolder}/cuda",
+        "-c",
+        "${file}",
+        "-o",
+        "/dev/null"
+      ],
+      "windows": {
+        "args": [
+          "-std=c++17",
+          "-arch=sm_75",
+          "-I${workspaceFolder}/cuda",
+          "-c",
+          "${file}",
+          "-o",
+          "NUL"
+        ]
+      },
+      "options": {
+        "cwd": "${workspaceFolder}/cuda"
+      },
+      "problemMatcher": [
+        {
+          "owner": "cuda",
+          "fileLocation": "absolute",
+          "pattern": {
+            "regexp": "^(.+)\\((\\d+)\\):\\s+(?:fatal\\s+)?(warning|error)(?:\\s+#[^:]+)?:\\s+(.*)$",
+            "file": 1,
+            "line": 2,
+            "severity": 3,
+            "message": 4
+          }
+        },
+        {
+          "owner": "cuda",
+          "fileLocation": "absolute",
+          "pattern": {
+            "regexp": "^(.+):(\\d+):(\\d+):\\s+(?:fatal\\s+)?(warning|error)(?:\\s+#[^:]+)?:\\s+(.*)$",
+            "file": 1,
+            "line": 2,
+            "column": 3,
+            "severity": 4,
+            "message": 5
+          }
+        }
+      ],
+      "group": "build",
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "检查 Python/Triton/TileLang：当前文件语法",
+      "type": "process",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "-m",
+        "py_compile",
+        "${file}"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "检查 Triton：运行相关测试并编译 kernel",
+      "type": "process",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_vector_add.py",
+        "tests/test_softmax.py",
+        "tests/test_fused_op.py",
+        "tests/test_matmul_triton.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "检查 TileLang：运行相关测试并编译 kernel",
+      "type": "process",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "-m",
+        "pytest",
+        "-q",
+        "tests/test_tilelang.py",
+        "tests/test_tilelang_softmax.py"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      }
+    },
+    {
+      "label": "检查全部 Python 作业",
+      "type": "process",
+      "command": "${command:python.interpreterPath}",
+      "args": [
+        "-m",
+        "pytest",
+        "-q",
+        "tests"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "group": "test",
+      "presentation": {
+        "clear": true,
+        "reveal": "always",
+        "panel": "shared"
+      }
+    }
+  ]
+}
