@@ -158,6 +158,9 @@ with Nsight Compute after the prototype is complete.
 
 ## Stage boundary
 
+P1 is now implemented separately; see [P1 experiment and validation](P1.md).
+Use `benchmark_p1.py` for P1. The original `benchmark.py` still runs P0.
+
 Keep each later step separately measurable:
 
 1. P0: `C = K^T U`
