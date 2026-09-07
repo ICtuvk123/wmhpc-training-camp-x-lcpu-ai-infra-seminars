@@ -1,4 +1,5 @@
 build/**
+experiments/sm100_phase6/build/**
 .cache/**
 *.egg-info/**
 *.so
