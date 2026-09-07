@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--impl", choices=["all", *SOURCES], default="all")
     parser.add_argument("--nvcc", default=os.environ.get("NVCC", "nvcc"))
-    parser.add_argument("--arch", default="sm_100a")
+    parser.add_argument("--arch", default="sm_103a")
     parser.add_argument("--warmup", type=int, default=30)
     parser.add_argument("--iters", type=int, default=200)
     parser.add_argument("--repeats", type=int, default=5)

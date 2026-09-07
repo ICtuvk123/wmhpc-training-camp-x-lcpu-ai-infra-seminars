@@ -30,7 +30,7 @@ using KtSmemLayout = decltype(cute::tile_to_shape(
     cute::make_shape(cute::Int<kM>{}, cute::Int<kK>{}), cute::LayoutRight{}));
 using USmemLayout = decltype(cute::tile_to_shape(
     cute::GMMA::Layout_K_INTER_Atom<BF16>{},
-    cute::make_shape(cute::Int<kK>{}, cute::Int<kN>{}), cute::LayoutLeft{}));
+    cute::make_shape(cute::Int<kN>{}, cute::Int<kK>{}), cute::LayoutRight{}));
 
 struct BaselineSharedStorage {
   alignas(128) cute::ArrayEngine<BF16, cute::cosize_v<KtSmemLayout>> kt;
@@ -67,9 +67,12 @@ __global__ void baseline_p0_kernel(const BF16* __restrict__ kt,
   Tensor g_kt = make_tensor(
       make_gmem_ptr(kt),
       make_layout(make_shape(Int<kM>{}, Int<kK>{}), LayoutRight{}));
+  // MMA B uses logical (N,K), even though the allocation is row-major U[K,N].
+  // Copy this transposed view into K-major SMEM for the non-transposing LDSM.
   Tensor g_u = make_tensor(
       make_gmem_ptr(u),
-      make_layout(make_shape(Int<kK>{}, Int<kN>{}), LayoutRight{}));
+      make_layout(make_shape(Int<kN>{}, Int<kK>{}),
+                  make_stride(Int<1>{}, Int<kN>{})));
 
   cooperative_copy<kThreads>(threadIdx.x, g_kt, s_kt);
   cooperative_copy<kThreads>(threadIdx.x, g_u, s_u);
@@ -122,7 +125,7 @@ __global__ void baseline_p0_kernel(const BF16* __restrict__ kt,
     for (int block_in_warp = 0; block_in_warp < 2; ++block_in_warp) {
       const int n_block = warp_id * 2 + block_in_warp;
       Tensor b_block = local_tile(
-          s_u, make_shape(Int<16>{}, Int<16>{}), make_coord(0, n_block));
+          s_u, make_shape(Int<16>{}, Int<16>{}), make_coord(n_block, 0));
       copy(smem_tiled_copy_b, smem_thr_copy_b.partition_S(b_block),
            tCrBi_b_view);
       cute::transform(tCrBi_b, tCrB, cute::identity{});
@@ -144,7 +147,22 @@ struct Options {
   int iters = 200;
   int batch = 1024;
   unsigned seed = 2026;
+  const char* input = "random";
+  int probe_m = 0;
+  int probe_k = 0;
+  int probe_n = 0;
 };
+
+int parse_coordinate(const char* flag, const char* text, int extent) {
+  char* end = nullptr;
+  long value = std::strtol(text, &end, 10);
+  if (end == text || *end != '\0' || value < 0 || value >= extent) {
+    std::fprintf(stderr, "invalid coordinate for %s: %s (extent %d)\n",
+                 flag, text, extent);
+    std::exit(EXIT_FAILURE);
+  }
+  return static_cast<int>(value);
+}
 
 int parse_positive(const char* flag, const char* text) {
   char* end = nullptr;
@@ -163,20 +181,60 @@ Options parse_options(int argc, char** argv) {
       std::fprintf(stderr, "missing value after %s\n", argv[i]);
       std::exit(EXIT_FAILURE);
     }
-    if (std::strcmp(argv[i], "--warmup") == 0) {
-      options.warmup = parse_positive(argv[i], argv[++i]);
-    } else if (std::strcmp(argv[i], "--iters") == 0) {
-      options.iters = parse_positive(argv[i], argv[++i]);
-    } else if (std::strcmp(argv[i], "--batch") == 0) {
-      options.batch = parse_positive(argv[i], argv[++i]);
-    } else if (std::strcmp(argv[i], "--seed") == 0) {
-      options.seed = static_cast<unsigned>(parse_positive(argv[i], argv[++i]));
+    const char* flag = argv[i];
+    const char* value = argv[++i];
+    if (std::strcmp(flag, "--warmup") == 0) {
+      options.warmup = parse_positive(flag, value);
+    } else if (std::strcmp(flag, "--iters") == 0) {
+      options.iters = parse_positive(flag, value);
+    } else if (std::strcmp(flag, "--batch") == 0) {
+      options.batch = parse_positive(flag, value);
+    } else if (std::strcmp(flag, "--seed") == 0) {
+      options.seed = static_cast<unsigned>(parse_positive(flag, value));
+    } else if (std::strcmp(flag, "--input") == 0) {
+      options.input = value;
+    } else if (std::strcmp(flag, "--m") == 0) {
+      options.probe_m = parse_coordinate(flag, value, kM);
+    } else if (std::strcmp(flag, "--k") == 0) {
+      options.probe_k = parse_coordinate(flag, value, kK);
+    } else if (std::strcmp(flag, "--n") == 0) {
+      options.probe_n = parse_coordinate(flag, value, kN);
     } else {
-      std::fprintf(stderr, "unknown option: %s\n", argv[i]);
+      std::fprintf(stderr, "unknown option: %s\n", flag);
       std::exit(EXIT_FAILURE);
     }
   }
+  if (std::strcmp(options.input, "random") != 0 &&
+      std::strcmp(options.input, "one-hot") != 0 &&
+      std::strcmp(options.input, "tagged") != 0) {
+    std::fprintf(stderr, "--input must be random, one-hot, or tagged\n");
+    std::exit(EXIT_FAILURE);
+  }
   return options;
+}
+
+void initialize_inputs(const Options& options, std::vector<BF16>& kt,
+                       std::vector<BF16>& u) {
+  if (std::strcmp(options.input, "one-hot") == 0) {
+    std::fill(kt.begin(), kt.end(), BF16(0.0f));
+    std::fill(u.begin(), u.end(), BF16(0.0f));
+    kt[options.probe_m * kK + options.probe_k] = BF16(1.0f);
+    u[options.probe_k * kN + options.probe_n] = BF16(1.0f);
+  } else if (std::strcmp(options.input, "tagged") == 0) {
+    // Small dyadic values are exact in BF16; products and sums are exact in
+    // FP32. Distinct row/column patterns exercise every reduction coordinate.
+    for (int m = 0; m < kM; ++m)
+      for (int k = 0; k < kK; ++k)
+        kt[m * kK + k] = BF16(float((m * 7 + k * 3) % 31 - 15) / 16.0f);
+    for (int k = 0; k < kK; ++k)
+      for (int n = 0; n < kN; ++n)
+        u[k * kN + n] = BF16(float((k * 11 + n * 5) % 29 - 14) / 16.0f);
+  } else {
+    std::mt19937 generator(options.seed);
+    std::uniform_real_distribution<float> distribution(-0.5f, 0.5f);
+    for (BF16& value : kt) value = BF16(distribution(generator));
+    for (BF16& value : u) value = BF16(distribution(generator));
+  }
 }
 
 void reference_gemm(const std::vector<BF16>& kt, const std::vector<BF16>& u,
@@ -200,9 +258,9 @@ int main(int argc, char** argv) {
   cudaDeviceProp props{};
   CUDA_CHECK(cudaGetDevice(&device));
   CUDA_CHECK(cudaGetDeviceProperties(&props, device));
-  if (props.major != 10 || props.minor != 3) {
+  if (props.major != 10 || (props.minor != 0 && props.minor != 3)) {
     std::fprintf(stderr,
-                 "baseline P0 is compiled for comparison on SM100; found "
+                 "baseline P0 requires Blackwell SM100/SM103; found "
                  "%d.%d (%s)\n",
                  props.major, props.minor, props.name);
     return 3;
@@ -213,10 +271,7 @@ int main(int argc, char** argv) {
   std::vector<float> h_ref(kM * kN);
   // Check both ends of the grid so a missing blockIdx.x output offset is caught.
   std::vector<float> h_got(2 * kM * kN);
-  std::mt19937 generator(options.seed);
-  std::uniform_real_distribution<float> distribution(-0.5f, 0.5f);
-  for (BF16& value : h_kt) value = BF16(distribution(generator));
-  for (BF16& value : h_u) value = BF16(distribution(generator));
+  initialize_inputs(options, h_kt, h_u);
   reference_gemm(h_kt, h_u, h_ref);
 
   BF16* d_kt = nullptr;
@@ -244,6 +299,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaEventRecord(start));
   for (int i = 0; i < options.iters; ++i) launch();
   CUDA_CHECK(cudaEventRecord(stop));
+  CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaEventSynchronize(stop));
   float elapsed_ms = 0.0f;
   CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start, stop));
@@ -257,14 +313,27 @@ int main(int argc, char** argv) {
   double max_rel = 0.0;
   bool finite = true;
   bool allclose = true;
-  for (size_t i = 0; i < h_ref.size(); ++i) {
+  const bool exact = std::strcmp(options.input, "random") != 0;
+  bool reported_mismatch = false;
+  for (size_t i = 0; i < h_got.size(); ++i) {
     finite = finite && std::isfinite(h_got[i]);
     const float reference = h_ref[i % h_ref.size()];
     const double abs_error = std::abs(static_cast<double>(h_got[i]) - reference);
     const double rel_error = abs_error / std::max(1.0e-6, std::abs(static_cast<double>(reference)));
     max_abs = std::max(max_abs, abs_error);
     max_rel = std::max(max_rel, rel_error);
-    allclose = allclose && abs_error <= 2.0e-2 + 2.0e-2 * std::abs(static_cast<double>(reference));
+    const double tolerance = exact ? 0.0 :
+        1.0e-5 + 1.0e-5 * std::abs(static_cast<double>(reference));
+    const bool matches = std::isfinite(h_got[i]) && abs_error <= tolerance;
+    allclose = allclose && matches;
+    if (!matches && !reported_mismatch) {
+      const size_t index = i % h_ref.size();
+      const int block = i < h_ref.size() ? 0 : options.batch - 1;
+      std::fprintf(stderr,
+          "first mismatch: block=%d m=%zu n=%zu expected=%.9g got=%.9g\n",
+          block, index / kN, index % kN, reference, h_got[i]);
+      reported_mismatch = true;
+    }
   }
 
   cudaFuncAttributes attributes{};
@@ -278,12 +347,15 @@ int main(int argc, char** argv) {
   const double cta_ns = launch_us * 1000.0 / options.batch;
   std::printf(
       "{\"implementation\":\"baseline\",\"implemented\":%s,"
+      "\"input\":\"%s\",\"probe_m\":%d,\"probe_k\":%d,\"probe_n\":%d,"
       "\"device\":\"%s\",\"cc\":\"%d.%d\",\"correct\":%s,"
       "\"max_abs\":%.9g,\"max_rel\":%.9g,\"launch_us\":%.6f,"
       "\"cta_ns\":%.6f,\"static_smem_bytes\":%zu,"
       "\"dynamic_smem_bytes\":%d,\"registers_per_thread\":%d,"
       "\"blocks_per_sm\":%d,\"tmem_columns\":null}\n",
-      kImplemented ? "true" : "false", props.name, props.major, props.minor,
+      kImplemented ? "true" : "false", options.input,
+      options.probe_m, options.probe_k, options.probe_n,
+      props.name, props.major, props.minor,
       correct ? "true" : "false", max_abs, max_rel, launch_us, cta_ns,
       attributes.sharedSizeBytes, kDynamicSmemBytes, attributes.numRegs,
       blocks_per_sm);

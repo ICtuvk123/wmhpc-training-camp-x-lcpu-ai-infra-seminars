@@ -244,8 +244,8 @@ int main(int argc, char** argv) {
   cudaDeviceProp props{};
   CUDA_CHECK(cudaGetDevice(&device));
   CUDA_CHECK(cudaGetDeviceProperties(&props, device));
-  if (props.major != 10 || props.minor != 0) {
-    std::fprintf(stderr, "tcgen05 P0 requires an SM100 device; found %d.%d (%s)\n",
+  if (props.major != 10 || (props.minor != 0 && props.minor != 3)) {
+    std::fprintf(stderr, "tcgen05 P0 requires Blackwell SM100/SM103; found %d.%d (%s)\n",
                  props.major, props.minor, props.name);
     return 3;
   }
@@ -299,7 +299,7 @@ int main(int argc, char** argv) {
   double max_rel = 0.0;
   bool finite = true;
   bool allclose = true;
-  for (size_t i = 0; i < h_ref.size(); ++i) {
+  for (size_t i = 0; i < h_got.size(); ++i) {
     finite = finite && std::isfinite(h_got[i]);
     const float reference = h_ref[i % h_ref.size()];
     const double abs_error = std::abs(static_cast<double>(h_got[i]) - reference);
