@@ -200,7 +200,7 @@ int main(int argc, char** argv) {
   cudaDeviceProp props{};
   CUDA_CHECK(cudaGetDevice(&device));
   CUDA_CHECK(cudaGetDeviceProperties(&props, device));
-  if (props.major != 10 || props.minor != 0) {
+  if (props.major != 10 || props.minor != 3) {
     std::fprintf(stderr,
                  "baseline P0 is compiled for comparison on SM100; found "
                  "%d.%d (%s)\n",
