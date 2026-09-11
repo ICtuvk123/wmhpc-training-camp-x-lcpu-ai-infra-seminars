@@ -66,7 +66,8 @@ ext_modules = [
             os.path.join(this_dir, 'csrc'),
         ],
         extra_compile_args={
-            'cxx': ['-O3', '-Wno-psabi'],
+            'cxx': ['-O3', '-Wno-psabi', *(['-DFLASH_KDA_ENABLE_SM100_V0=1']
+                                         if is_flag_set('FLASH_KDA_ENABLE_SM100_V0') else [])],
             'nvcc': [
                 '-O3',
                 '-U__CUDA_NO_HALF_OPERATORS__',
@@ -80,6 +81,7 @@ ext_modules = [
                 '-lineinfo',
                 *get_nvcc_thread_args(),
                 *get_arch_flags(),
+                *(['-DFLASH_KDA_ENABLE_SM100_V0=1'] if is_flag_set('FLASH_KDA_ENABLE_SM100_V0') else []),
             ],
         },
     )

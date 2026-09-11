@@ -6,6 +6,10 @@
 
 #include "utils.cuh"
 
+#if defined(FLASH_KDA_ENABLE_SM100_V0)
+#include "fwd_kernel2_sm100_v0.cuh"
+#endif
+
 template <int D, int CHUNK = 16>
 struct K2Layouts {
     using MMALayout = decltype(tile_to_shape(
@@ -112,6 +116,22 @@ struct SharedStorageK2 {
 };
 
 // ==================== Kernel 2: Recurrence ====================
+#if defined(FLASH_KDA_ENABLE_SM100_V0)
+template <class Layouts, int InputStages, int OutputStages>
+struct SharedStorageK2SM100V0 : SharedStorageK2<Layouts, InputStages, OutputStages> {
+    flash_kda_sm100_v0::Storage<typename Layouts::VOLayout> sm100_v0;
+};
+#endif
+
+template <class Layouts, int InputStages, int OutputStages, bool UseSM100V0>
+using SelectedSharedStorageK2 =
+#if defined(FLASH_KDA_ENABLE_SM100_V0)
+    cute::conditional_t<UseSM100V0, SharedStorageK2SM100V0<Layouts, InputStages, OutputStages>,
+                        SharedStorageK2<Layouts, InputStages, OutputStages>>;
+#else
+    SharedStorageK2<Layouts, InputStages, OutputStages>;
+#endif
+
 template <
     class TmaLoadV,
     class TmaLoadBeta,
@@ -128,7 +148,8 @@ template <
     bool HasStateIn = true,
     bool HasStateOut = true,
     bool StateFP32 = false,
-    bool IsVarlen = true
+    bool IsVarlen = true,
+    bool UseSM100V0 = false
 >
 __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
     CUTE_GRID_CONSTANT TmaLoadV const tma_load_v,
@@ -149,6 +170,10 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
     int64_t const* cu_seqlens,
     int total_tiles
 ) {
+#if !defined(FLASH_KDA_ENABLE_SM100_V0)
+    static_assert(!UseSM100V0, "Rebuild with FLASH_KDA_ENABLE_SM100_V0=1 for the experimental path");
+#endif
+    static_assert(!UseSM100V0 || (D == 128 && CHUNK == 16), "V0 supports D=128, CHUNK=16");
     using BF16 = cutlass::bfloat16_t;
     using FP16 = cutlass::half_t;
     using Layouts = K2Layouts<D, CHUNK>;
@@ -182,7 +207,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
 
     // --- shared memory
     extern __shared__ __align__(128) unsigned char shared_mem[];
-    using SharedStorageT = SharedStorageK2<Layouts, InputStages, OutputStages>;
+    using SharedStorageT = SelectedSharedStorageK2<Layouts, InputStages, OutputStages, UseSM100V0>;
     SharedStorageT& shared_storage = *reinterpret_cast<SharedStorageT*>(shared_mem);
 
     // --- warp specialization
@@ -425,6 +450,11 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
     // --- MMA warps
     if (warp_role == WarpRole::MMA) {
         cutlass::arch::NamedBarrier compute_barrier(kComputeThreads, 0);
+#if defined(FLASH_KDA_ENABLE_SM100_V0)
+        if constexpr (UseSM100V0) {
+            flash_kda_sm100_v0::initialize(shared_storage.sm100_v0, threadIdx.x, compute_barrier);
+        }
+#endif
 #ifndef TMA_DISABLE_ALL
         LoadPipelineState load_read;
         StorePipelineState out_write = cutlass::make_producer_start_state<StorePipeline>();
@@ -657,6 +687,25 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
             }
 
             // ======== Phase 6: s_acc update ========
+#if defined(FLASH_KDA_ENABLE_SM100_V0)
+            if constexpr (UseSM100V0) {
+                // Publish the existing BF16 U C fragments into V0's dedicated
+                // buffer. Only the 128 compute threads participate in this path.
+                Tensor s_u = make_tensor(make_smem_ptr(shared_storage.sm100_v0.u.begin()), VOLayout{});
+                #pragma unroll
+                for (int bi = 0; bi < 2; ++bi) {
+                    Tensor u_block = local_tile(s_u, make_shape(Int<16>{}, Int<16>{}),
+                                                make_coord(0, warp_id * 2 + bi));
+                    copy(smem_tiled_store_C, smem_thr_store_C.retile_S(u_bf16[bi]),
+                         smem_thr_store_C.partition_D(u_block));
+                }
+                compute_barrier.arrive_and_wait();
+                Tensor s_u_t = make_tensor(make_smem_ptr(shared_storage.sm100_v0.u.begin()), TransposedVOLayout{});
+                flash_kda_sm100_v0::update(shared_storage.sm100_v0, k_restored_t, s_u_t,
+                                           s_acc_T, g_total, compute_tid, t, compute_barrier);
+            } else
+#endif
+            {
             // s_acc[D, D] = s_acc * g_total + k_restored_t[D, 16] @ U[16, D]
             // Each warp handles columns [warp_id*32, (warp_id+1)*32] = 2 x 16x16 blocks
             // U is already in tCrB_u_arr[0..1] as B operands (from Phase 4 MOVM_T)
@@ -730,6 +779,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
                 }
             }
             }
+            }
             compute_barrier.arrive_and_wait();
 
 #ifndef TMA_DISABLE_ALL
@@ -740,6 +790,11 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
             ++out_write;
 #endif
         }
+#if defined(FLASH_KDA_ENABLE_SM100_V0)
+        if constexpr (UseSM100V0) {
+            flash_kda_sm100_v0::release(shared_storage.sm100_v0, threadIdx.x, compute_barrier);
+        }
+#endif
     }
 
 #ifndef TMA_DISABLE_ALL

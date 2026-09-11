@@ -3,7 +3,7 @@
 #include "fwd_kernel2.cuh"
 
 // ==================== launch_fwd ====================
-template <int D, bool HasStateIn, bool HasStateOut, bool StateFP32, bool IsVarlen>
+template <int D, bool HasStateIn, bool HasStateOut, bool StateFP32, bool IsVarlen, bool UseSM100V0>
 void launch_fwd(
     cutlass::bfloat16_t const* q_ptr,
     cutlass::bfloat16_t const* k_ptr,
@@ -184,7 +184,7 @@ void launch_fwd(
 #if BLOCK_LEVEL_K2 >= 0
     {
         constexpr int kK2Threads = 32 * 2 + 128;
-        using SharedStorageK2T = SharedStorageK2<K2L, kInputStages, kOutputStages>;
+        using SharedStorageK2T = SelectedSharedStorageK2<K2L, kInputStages, kOutputStages, UseSM100V0>;
         int smem_size_k2 = sizeof(SharedStorageK2T);
 
         auto kernel2 = _flash_kda_fwd_recurrence<
@@ -195,7 +195,7 @@ void launch_fwd(
             decltype(tma_store_final_state),
             decltype(tma_store_out),
             CHUNK, D, kInputStages, kOutputStages, kK2Threads,
-            HasStateIn, HasStateOut, StateFP32, IsVarlen
+            HasStateIn, HasStateOut, StateFP32, IsVarlen, UseSM100V0
         >;
 
         cudaFuncSetAttribute(kernel2, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_k2);
@@ -217,22 +217,26 @@ void launch_fwd(
 }
 
 // Explicit instantiations
-#define INSTANTIATE_LAUNCH_FWD(D, HI, HO, FP32, VL) \
-    template void launch_fwd<D, HI, HO, FP32, VL>( \
+#define INSTANTIATE_LAUNCH_FWD(D, HI, HO, FP32, VL, V0) \
+    template void launch_fwd<D, HI, HO, FP32, VL, V0>( \
         cutlass::bfloat16_t const*, cutlass::bfloat16_t const*, \
         cutlass::bfloat16_t const*, cutlass::bfloat16_t const*, \
         cutlass::bfloat16_t const*, void const*, float, void*, \
         cutlass::bfloat16_t*, void*, int, int, int, int, \
         int64_t const*, float const*, float const*, float, cudaStream_t);
 
-#define INSTANTIATE_STATE_VARIANTS(VL) \
-    INSTANTIATE_LAUNCH_FWD(128, true,  true,  false, VL) \
-    INSTANTIATE_LAUNCH_FWD(128, true,  true,  true,  VL) \
-    INSTANTIATE_LAUNCH_FWD(128, false, false, false, VL) \
-    INSTANTIATE_LAUNCH_FWD(128, false, true,  false, VL) \
-    INSTANTIATE_LAUNCH_FWD(128, true,  false, false, VL) \
-    INSTANTIATE_LAUNCH_FWD(128, false, true,  true,  VL) \
-    INSTANTIATE_LAUNCH_FWD(128, true,  false, true,  VL)
+#define INSTANTIATE_STATE_VARIANTS(VL, V0) \
+    INSTANTIATE_LAUNCH_FWD(128, true,  true,  false, VL, V0) \
+    INSTANTIATE_LAUNCH_FWD(128, true,  true,  true,  VL, V0) \
+    INSTANTIATE_LAUNCH_FWD(128, false, false, false, VL, V0) \
+    INSTANTIATE_LAUNCH_FWD(128, false, true,  false, VL, V0) \
+    INSTANTIATE_LAUNCH_FWD(128, true,  false, false, VL, V0) \
+    INSTANTIATE_LAUNCH_FWD(128, false, true,  true,  VL, V0) \
+    INSTANTIATE_LAUNCH_FWD(128, true,  false, true,  VL, V0)
 
-INSTANTIATE_STATE_VARIANTS(true)   // varlen
-INSTANTIATE_STATE_VARIANTS(false)  // non-varlen
+INSTANTIATE_STATE_VARIANTS(true, false)   // varlen baseline
+INSTANTIATE_STATE_VARIANTS(false, false)  // non-varlen baseline
+#if defined(FLASH_KDA_ENABLE_SM100_V0)
+INSTANTIATE_STATE_VARIANTS(true, true)
+INSTANTIATE_STATE_VARIANTS(false, true)
+#endif

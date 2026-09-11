@@ -1,6 +1,8 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include "fwd.h"
+#include <cstdlib>
+#include <string>
 
 int64_t get_workspace_size(
     int64_t T_total,
@@ -109,6 +111,26 @@ void fwd(
 
     TORCH_CHECK(D == 128, "currently only supports D == 128");
 
+    // Experimental selection is explicit; an ordinary build/call keeps the
+    // original K2 path. Selection is read per call to allow interleaved tests.
+    const char* requested_k2 = std::getenv("FLASH_KDA_K2_IMPL");
+    const std::string k2_impl = requested_k2 ? requested_k2 : "baseline";
+    TORCH_CHECK(k2_impl == "baseline" || k2_impl == "sm100_v0",
+                "FLASH_KDA_K2_IMPL must be baseline or sm100_v0");
+    const bool use_sm100_v0 = k2_impl == "sm100_v0";
+    if (use_sm100_v0) {
+#if defined(FLASH_KDA_ENABLE_SM100_V0)
+        int major = 0, minor = 0;
+        TORCH_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, q.get_device()) == cudaSuccess &&
+                    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, q.get_device()) == cudaSuccess,
+                    "Cannot query device capability for SM100 V0");
+        TORCH_CHECK(major == 10 && (minor == 0 || minor == 3),
+                    "sm100_v0 requires SM100/SM103; use baseline on other architectures");
+#else
+        TORCH_CHECK(false, "Rebuild with FLASH_KDA_ENABLE_SM100_V0=1 to enable sm100_v0");
+#endif
+    }
+
     // Flatten [B, T, H, D] -> [B*T, H, D] (contiguous, same data pointer)
     auto q_3d = q.reshape({T_total, H, D});
     auto k_3d = k.reshape({T_total, H, D});
@@ -181,13 +203,21 @@ void fwd(
     }
 
     // Dispatch based on state configuration and varlen
-    #define LAUNCH(HI, HO, FP32, VL) \
-        launch_fwd<128, HI, HO, FP32, VL>( \
+    #define LAUNCH_IMPL(HI, HO, FP32, VL, V0) \
+        launch_fwd<128, HI, HO, FP32, VL, V0>( \
             q_ptr, k_ptr, v_ptr, g_ptr, beta_t_ptr, \
             initial_state_raw, scale_f, final_state_raw, out_ptr, \
             workspace_ptr, total_tiles, \
             int(T_total), int(H), int(N_val), cu_seqlens_dev, \
             A_log_ptr, dt_bias_ptr, gate_scale, stream)
+
+    #if defined(FLASH_KDA_ENABLE_SM100_V0)
+    #define LAUNCH(HI, HO, FP32, VL) \
+        if (use_sm100_v0) { LAUNCH_IMPL(HI, HO, FP32, VL, true); } \
+        else { LAUNCH_IMPL(HI, HO, FP32, VL, false); }
+    #else
+    #define LAUNCH(HI, HO, FP32, VL) LAUNCH_IMPL(HI, HO, FP32, VL, false)
+    #endif
 
     #define DISPATCH_STATE(VL) \
         if (!has_state_in && !has_state_out) { \
@@ -214,6 +244,7 @@ void fwd(
 
     #undef DISPATCH_STATE
     #undef LAUNCH
+    #undef LAUNCH_IMPL
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
