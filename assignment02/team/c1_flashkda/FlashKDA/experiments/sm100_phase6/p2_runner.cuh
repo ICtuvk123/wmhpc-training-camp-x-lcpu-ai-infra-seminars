@@ -89,7 +89,7 @@ inline void p2_inputs(const P2Options& o, std::vector<BF16>& kt,
 
 template <class Kernel, class Launch>
 int run_p2(int argc, char** argv, const char* implementation, Kernel kernel,
-           Launch launch, int tmem_columns) {
+           Launch launch, int tmem_columns, const float* constant_decay = nullptr) {
   const P2Options o = p2_options(argc, argv);
   int device = 0;
   cudaDeviceProp props{};
@@ -108,10 +108,13 @@ int run_p2(int argc, char** argv, const char* implementation, Kernel kernel,
   p2_inputs(o, kt, u, state);
   // Distinct, non-unit dyadic decay per key-feature row and CTA. This catches
   // column broadcast, scalar decay, and a missing per-CTA g offset.
+  // The const-g control supplies its kernel constant here so the CPU reference
+  // uses the same decay. Allocation/copies remain outside the timing interval.
   std::vector<float> decay(static_cast<size_t>(o.batch) * kM);
   for (int block = 0; block < o.batch; ++block)
     for (int m = 0; m < kM; ++m)
       decay[static_cast<size_t>(block) * kM + m] =
+          constant_decay ? *constant_decay :
           float(1 + (m * 37 + block * 13) % 128) / 128.0f;
   const size_t decay_bytes = decay.size() * sizeof(float);
   // Independent, higher-precision oracle from the actual rounded BF16 inputs.
@@ -192,7 +195,7 @@ int run_p2(int argc, char** argv, const char* implementation, Kernel kernel,
   std::printf(
       "{\"stage\":\"p2\",\"operation\":\"S*g_total+K^T U\",\"implementation\":\"%s\","
       "\"implemented\":true,\"device\":\"%s\",\"cc\":\"%d.%d\",\"correct\":%s,"
-      "\"state_unchanged\":%s,\"decay_unchanged\":%s,\"decay_axis\":\"row\","
+      "\"state_unchanged\":%s,\"decay_unchanged\":%s,\"decay_axis\":\"%s\","
       "\"input\":\"%s\",\"state\":\"%s\",\"exact\":%s,"
       "\"probe_m\":%d,\"probe_k\":%d,\"probe_n\":%d,\"batch\":%d,\"seed\":%u,"
       "\"warmup\":%d,\"iters\":%d,\"checked_ctas\":%d,"
@@ -202,6 +205,7 @@ int run_p2(int argc, char** argv, const char* implementation, Kernel kernel,
       "\"tmem_columns\":%d,\"achieved_occupancy_pct\":null}\n",
       implementation, props.name, props.major, props.minor, correct ? "true" : "false",
       state_unchanged ? "true" : "false", decay_unchanged ? "true" : "false",
+      constant_decay ? "constant" : "row",
       o.input.c_str(), o.state.c_str(), exact ? "true" : "false",
       o.m, o.k, o.n, o.batch, o.seed, o.warmup, o.iters, o.batch,
       max_abs, max_rel, launch_us, launch_us * 1000.0 / o.batch,
