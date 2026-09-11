@@ -115,9 +115,10 @@ void fwd(
     // original K2 path. Selection is read per call to allow interleaved tests.
     const char* requested_k2 = std::getenv("FLASH_KDA_K2_IMPL");
     const std::string k2_impl = requested_k2 ? requested_k2 : "baseline";
-    TORCH_CHECK(k2_impl == "baseline" || k2_impl == "sm100_v0",
-                "FLASH_KDA_K2_IMPL must be baseline or sm100_v0");
+    TORCH_CHECK(k2_impl == "baseline" || k2_impl == "sm100_v0" || k2_impl == "v1a",
+                "FLASH_KDA_K2_IMPL must be baseline, sm100_v0, or v1a");
     const bool use_sm100_v0 = k2_impl == "sm100_v0";
+    const bool use_v1a = k2_impl == "v1a";
     if (use_sm100_v0) {
 #if defined(FLASH_KDA_ENABLE_SM100_V0)
         int major = 0, minor = 0;
@@ -128,6 +129,14 @@ void fwd(
                     "sm100_v0 requires SM100/SM103; use baseline on other architectures");
 #else
         TORCH_CHECK(false, "Rebuild with FLASH_KDA_ENABLE_SM100_V0=1 to enable sm100_v0");
+#endif
+    }
+    if (use_v1a) {
+#if defined(FLASH_KDA_ENABLE_V1A)
+        TORCH_CHECK(has_state_in && has_state_out && !state_fp32 && !cu_seqlens.has_value(),
+                    "v1a currently requires fixed-length BF16 initial_state and final_state");
+#else
+        TORCH_CHECK(false, "Rebuild with FLASH_KDA_ENABLE_V1A=1 to enable v1a");
 #endif
     }
 
@@ -203,8 +212,8 @@ void fwd(
     }
 
     // Dispatch based on state configuration and varlen
-    #define LAUNCH_IMPL(HI, HO, FP32, VL, V0) \
-        launch_fwd<128, HI, HO, FP32, VL, V0>( \
+    #define LAUNCH_IMPL(HI, HO, FP32, VL, V0, V1A) \
+        launch_fwd<128, HI, HO, FP32, VL, V0, V1A>( \
             q_ptr, k_ptr, v_ptr, g_ptr, beta_t_ptr, \
             initial_state_raw, scale_f, final_state_raw, out_ptr, \
             workspace_ptr, total_tiles, \
@@ -213,10 +222,10 @@ void fwd(
 
     #if defined(FLASH_KDA_ENABLE_SM100_V0)
     #define LAUNCH(HI, HO, FP32, VL) \
-        if (use_sm100_v0) { LAUNCH_IMPL(HI, HO, FP32, VL, true); } \
-        else { LAUNCH_IMPL(HI, HO, FP32, VL, false); }
+        if (use_sm100_v0) { LAUNCH_IMPL(HI, HO, FP32, VL, true, false); } \
+        else { LAUNCH_IMPL(HI, HO, FP32, VL, false, false); }
     #else
-    #define LAUNCH(HI, HO, FP32, VL) LAUNCH_IMPL(HI, HO, FP32, VL, false)
+    #define LAUNCH(HI, HO, FP32, VL) LAUNCH_IMPL(HI, HO, FP32, VL, false, false)
     #endif
 
     #define DISPATCH_STATE(VL) \
@@ -236,7 +245,11 @@ void fwd(
             LAUNCH(true, false, false, VL); \
         }
 
-    if (is_varlen) {
+    if (use_v1a) {
+#if defined(FLASH_KDA_ENABLE_V1A)
+        LAUNCH_IMPL(true, true, false, false, false, true);
+#endif
+    } else if (is_varlen) {
         DISPATCH_STATE(true);
     } else {
         DISPATCH_STATE(false);

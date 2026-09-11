@@ -11,6 +11,7 @@ int main() {
     using Layouts = K2Layouts<128, 16>;
     using Baseline = SharedStorageK2<Layouts, 3, 2>;
     using V0 = SharedStorageK2SM100V0<Layouts, 3, 2>;
+    using V1A = SharedStorageK2V1A<Layouts, 3, 2>;
     alignas(128) ArrayEngine<BF16, cosize_v<Layouts::StateSmemLayout>> state_data;
     alignas(128) ArrayEngine<BF16, cosize_v<Layouts::MMALayout>> kr_data;
     flash_kda_sm100_v0::Storage<Layouts::VOLayout> scratch;
@@ -78,6 +79,16 @@ int main() {
             const int source_lane = col * 4 + row / 2, source_half = row % 2;
             assert(c_values[source_lane][word * 2 + source_half] == b_values[lane][word * 2 + half]);
         }
-    std::printf("PASS: state/U/K transpose aliases, V0 state/decay partitions, SM80 C-to-B MOVM mapping\n"
-                "baseline_smem_bytes=%zu v0_smem_bytes=%zu extra_bytes=%zu\n", sizeof(Baseline), sizeof(V0), sizeof(V0) - sizeof(Baseline));
+    std::array<int, 128 * 128> register_visits{};
+    for (int warp = 0; warp < 4; ++warp) for (int bi = 0; bi < 2; ++bi)
+        for (int kb = 0; kb < 8; ++kb) for (int lane = 0; lane < 32; ++lane)
+            for (int i = 0; i < 8; ++i) {
+                int key = kb * 16 + b_values[lane][i] % 16;
+                int value = (warp * 2 + bi) * 16 + b_values[lane][i] / 16;
+                ++register_visits[value * 128 + key];
+            }
+    for (int count : register_visits) assert(count == 1);
+    std::printf("PASS: state/U/K aliases, V0 decay partition, MOVM mapping, V1a full-state ownership\n"
+                "baseline_smem_bytes=%zu v0_smem_bytes=%zu v1a_smem_bytes=%zu v0_extra_bytes=%zu v1a_saved_bytes=%zu\n",
+                sizeof(Baseline), sizeof(V0), sizeof(V1A), sizeof(V0) - sizeof(Baseline), sizeof(Baseline) - sizeof(V1A));
 }

@@ -174,3 +174,34 @@ the new pytest module skips without CUDA-enabled PyTorch. The full PyTorch
 extension build, GPU correctness, synchronization behavior, runtime fallback,
 and all latency/speedup measurements therefore remain unverified on target
 hardware. No NCU run or performance GO/NO-GO claim has been made.
+
+## V1a register-state experiment
+
+V1a is a separate opt-in specialization. It supports fixed-length execution
+with BF16 initial and final state only. Build and select it with:
+
+```bash
+FLASH_KDA_ENABLE_V1A=1 FLASH_KDA_CUDA_ARCHS=103a \
+  python setup.py build_ext --inplace --force
+FLASH_KDA_K2_IMPL=v1a python -m pytest -p no:cacheprovider \
+  experiments/sm100_k2_integration/test_v1a.py -x -q
+```
+
+The test runs recurrence depths 1, 2, 4, 8, 16, and 128 chunks. Every depth
+requires exact output and final-state equality with baseline and verifies that
+the initial state is unchanged. Run this ladder before the full suite.
+
+V1a removes canonical `state_acc` from SharedStorage. Each compute thread owns
+eight key blocks for each of its two 16-column blocks, totaling 128 BF16 values
+or 64 packed 32-bit registers. Phase 1 consumes those persistent B fragments
+directly. Phase 6 retains the production SM80 MMA, converts each B fragment to
+the matching C distribution with `MOVM_T`, applies FP32 decay/update, rounds to
+BF16, and converts it back for the next chunk. Initial/final state use direct,
+coalesced GMEM access at recurrence boundaries. No full-state staging or
+CTA-wide barrier was added.
+
+Local SM103a compilation reports 137 registers/thread, 62,464 bytes dynamic
+SMEM, zero stack, and zero spill loads/stores. Compared with the matching
+baseline specialization, this removes 35,968 bytes of dynamic SMEM. These are
+compiler/layout results only; the recurrence ladder and latency remain pending
+on B300.
