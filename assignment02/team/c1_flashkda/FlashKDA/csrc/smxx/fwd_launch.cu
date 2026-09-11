@@ -200,6 +200,14 @@ void launch_fwd(
         >;
 
         cudaFuncSetAttribute(kernel2, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size_k2);
+        if constexpr (UseV1A) {
+            // V1a's 62 KiB block can fit three times in the SM100 shared-memory
+            // capacity, but the default ~135 KiB carveout limits it to two.
+            // This is a preference (the driver may choose another split) and is
+            // scoped to the distinct V1a kernel specialization.
+            cudaFuncSetAttribute(kernel2, cudaFuncAttributePreferredSharedMemoryCarveout,
+                                 cudaSharedmemCarveoutMaxShared);
+        }
 
         dim3 grid_k2(N, H);
         dim3 block_k2(kK2Threads);

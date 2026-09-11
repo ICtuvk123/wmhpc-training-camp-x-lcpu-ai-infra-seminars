@@ -233,6 +233,28 @@ identify baseline as 73 registers / 98,432 bytes SMEM and V1a as 137 registers /
 the comparison. Exact full-output and final-state equality is checked before and
 after timing.
 
+### V1a maximum-carveout experiment
+
+The V1a specialization requests `cudaSharedmemCarveoutMaxShared` with
+`cudaFuncAttributePreferredSharedMemoryCarveout` before launch. Baseline and V0
+do not set this preference. Kernel math, SharedStorage, and register lifetimes
+are unchanged. The CUDA attribute is a preference, so verify the effective
+configuration on B300 rather than assuming the request was honored:
+
+```bash
+ncu --section LaunchStats --section Occupancy \
+  -o experiments/sm100_k2_integration/v1a_carveout_b8 \
+  experiments/sm100_k2_integration/build/k2_compare_v1a \
+  --batch 8 --tokens 1024 --warmup 1 --iters 1 --rounds 1
+```
+
+For the V1a kernel, first require approximately 200.7 KiB Shared Memory
+Configuration Size and `Block Limit Shared Mem >= 3`. Registers remain 137 and
+should still report `Block Limit Registers = 2`; performance and waves are not
+expected to improve from this carveout-only experiment. Rebuild both
+`fwd_v1a.o` and `k2_compare_v1a` before profiling because the preference is set
+by the host launcher.
+
 The first B300 structured-pattern run localized an error to the 16x16 tile
 interior. `partition_B(identity)` for the SM80 TN atom exposes its identity
 coordinate as `(N,K)`. V1a initially interpreted it as `(K,N)` in the direct
