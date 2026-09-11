@@ -84,7 +84,7 @@ __global__ void v1b_mapping_kernel(
       int n = (warp * 2 + bi) * 16 + int(get<0>(coord));
       int k = int(get<1>(coord));
       u_frag(i) = u[k * N + n];
-      s_b(n, k) = u_frag(i);
+      s_b(make_coord(n, k), Int<0>{}, Int<0>{}) = u_frag(i);
       if (atomicCAS(&u_owner[k * N + n], -1, tid) != -1) atomicAdd(&errors[0], 1);
     }
   }
@@ -111,7 +111,7 @@ __global__ void v1b_mapping_kernel(
   // k_restored_t is logically [128,16], exactly tcgen05 A=[M,K].
   for (int linear = tid; linear < M * K; linear += ComputeThreads) {
     int row = linear / K, k = linear % K;
-    s_a(row, k) = kt[row * K + k];
+    s_a(make_coord(row, k), Int<0>{}, Int<0>{}) = kt[row * K + k];
     if (atomicCAS(&a_owner[linear], -1, tid) != -1) atomicAdd(&errors[4], 1);
   }
   cutlass::arch::fence_view_async_shared();
@@ -151,24 +151,33 @@ __global__ void v1b_mapping_kernel(
   wait_barrier(storage.mma_barrier, 0);
   asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
 
-  auto tmem_copy = make_tmem_copy(SM100_TMEM_LOAD_32dp32b1x{}, tCtAcc);
-  auto tmem_thr = tmem_copy.get_slice(tid);
-  Tensor tDtAcc = tmem_thr.partition_S(tCtAcc);
-  Tensor tDgC = tmem_thr.partition_D(tCgC);
+  TiledCopy tmem_to_register =
+      make_tmem_copy(SM100_TMEM_LOAD_32dp32b1x{}, tCtAcc);
+  ThrCopy tmem_copy_thread = tmem_to_register.get_slice(threadIdx.x);
+  Tensor tDtAcc = tmem_copy_thread.partition_S(tCtAcc);
+  Tensor tDgC = tmem_copy_thread.partition_D(tCgC);
+  using AccType = typename decltype(tCtAcc)::value_type;
+  // Keep copy-atom mode 0 intact. It represents 32 TMEM data paths even
+  // though each thread's register destination has a single first mode.
+  Tensor tDtAccGrouped = group_modes<1, decltype(rank(tDtAcc))::value>(tDtAcc);
+  Tensor tDgCGrouped = group_modes<1, decltype(rank(tDgC))::value>(tDgC);
+
   Tensor tCgCoord = cta.partition_C(c_identity);
-  Tensor tDgCoord = tmem_thr.partition_D(tCgCoord);
-  Tensor tDtGrouped = group_modes<1, decltype(rank(tDtAcc))::value>(tDtAcc);
+  Tensor tDgCoord = tmem_copy_thread.partition_D(tCgCoord);
   Tensor tDgCoordGrouped = group_modes<1, decltype(rank(tDgCoord))::value>(tDgCoord);
   constexpr int AccChunk = 16;
-  CUTE_STATIC_ASSERT_V(size<0>(tDtGrouped) == Int<1>{});
-  CUTE_STATIC_ASSERT_V(size<1>(tDtGrouped) % Int<AccChunk>{} == Int<0>{});
+  CUTE_STATIC_ASSERT_V(size<0>(tDgCGrouped) == Int<1>{});
+  CUTE_STATIC_ASSERT_V(size<0>(tDgCoordGrouped) == Int<1>{});
+  CUTE_STATIC_ASSERT_V(size(tDgCGrouped) == size(tDgCoordGrouped));
+  CUTE_STATIC_ASSERT_V(size<1>(tDgCGrouped) % Int<AccChunk>{} == Int<0>{});
   int matched = 0;
 #pragma unroll
-  for (int chunk = 0; chunk < size<1>(tDtGrouped) / AccChunk; ++chunk) {
-    Tensor tDtChunk = local_tile(tDtGrouped, make_shape(_1{}, Int<AccChunk>{}),
-                                 make_coord(0, chunk));
-    Tensor acc = make_tensor<float>(make_shape(_1{}, Int<AccChunk>{}));
-    copy(tmem_copy, tDtChunk, acc);
+  for (int chunk = 0; chunk < size<1>(tDgCGrouped) / AccChunk; ++chunk) {
+    Tensor tDtChunk = local_tile(tDtAccGrouped,
+        make_shape(shape<0>(tDtAccGrouped), Int<AccChunk>{}), make_coord(0, chunk));
+    Tensor tDrChunk = make_tensor<AccType>(
+        make_shape(shape<0>(tDgCGrouped), Int<AccChunk>{}));
+    copy(tmem_to_register, tDtChunk, tDrChunk);
     cutlass::arch::fence_view_async_tmem_load();
 #pragma unroll
     for (int i = 0; i < AccChunk; ++i) {
@@ -177,7 +186,7 @@ __global__ void v1b_mapping_kernel(
     int row = int(get<0>(tc)), col = int(get<1>(tc));
     int logical = row * N + col;
     if (atomicCAS(&tmem_owner[logical], -1, tid) != -1) atomicAdd(&errors[2], 1);
-    product[logical] = acc(0, i);
+    product[logical] = tDrChunk(0, i);
 
     bool found = false;
 #pragma unroll
@@ -191,7 +200,8 @@ __global__ void v1b_mapping_kernel(
           int sr = kb * 16 + int(get<1>(sc));
           int scol = (warp * 2 + bi) * 16 + int(get<0>(sc));
           if (sr == row && scol == col) {
-            state[bi][kb](j) = BF16(bf16_to_f32(state[bi][kb](j)) * decay[row] + acc(0, i));
+            state[bi][kb](j) = BF16(
+                bf16_to_f32(state[bi][kb](j)) * decay[row] + tDrChunk(0, i));
             found = true;
           }
         }
