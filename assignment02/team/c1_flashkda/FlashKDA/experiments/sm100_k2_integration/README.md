@@ -292,3 +292,24 @@ g++ -std=c++17 -Icsrc \
   -o experiments/sm100_k2_integration/build/test_k2_dispatch
 experiments/sm100_k2_integration/build/test_k2_dispatch
 ```
+
+### Final production benchmark
+
+`benchmark_production_dispatch.py` measures the full public `flash_kda.fwd`
+path for B1/T8192, B4/T2048, and B8/T1024 with H=64 and D=128. It launches
+baseline, V1a, and auto in separate processes, uses identical deterministic
+inputs, and requires bitwise-equal output and final state before reporting the
+mean and median CUDA-event latency.
+
+Build the SM103a extension and run the final B300 acceptance benchmark:
+
+```bash
+FLASH_KDA_ENABLE_V1A=1 FLASH_KDA_CUDA_ARCHS=103a \
+  python setup.py build_ext --inplace --force
+
+python experiments/sm100_k2_integration/benchmark_production_dispatch.py \
+  --warmup 30 --iters 200
+```
+
+The expected auto choices are V1a for B1/T8192 (512 chunks) and B4/T2048
+(128 chunks), and baseline for B8/T1024 (64 chunks).
