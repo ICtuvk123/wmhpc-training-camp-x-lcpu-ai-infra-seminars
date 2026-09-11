@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include "fwd.h"
+#include "k2_dispatch.h"
 #include <cstdlib>
 #include <string>
 
@@ -111,34 +112,13 @@ void fwd(
 
     TORCH_CHECK(D == 128, "currently only supports D == 128");
 
-    // Experimental selection is explicit; an ordinary build/call keeps the
-    // original K2 path. Selection is read per call to allow interleaved tests.
+    // Preserve the public default (baseline). Selection is read per call so
+    // correctness and benchmark tests can interleave implementations.
     const char* requested_k2 = std::getenv("FLASH_KDA_K2_IMPL");
-    const std::string k2_impl = requested_k2 ? requested_k2 : "baseline";
-    TORCH_CHECK(k2_impl == "baseline" || k2_impl == "sm100_v0" || k2_impl == "v1a",
-                "FLASH_KDA_K2_IMPL must be baseline, sm100_v0, or v1a");
-    const bool use_sm100_v0 = k2_impl == "sm100_v0";
-    const bool use_v1a = k2_impl == "v1a";
-    if (use_sm100_v0) {
-#if defined(FLASH_KDA_ENABLE_SM100_V0)
-        int major = 0, minor = 0;
-        TORCH_CHECK(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, q.get_device()) == cudaSuccess &&
-                    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, q.get_device()) == cudaSuccess,
-                    "Cannot query device capability for SM100 V0");
-        TORCH_CHECK(major == 10 && (minor == 0 || minor == 3),
-                    "sm100_v0 requires SM100/SM103; use baseline on other architectures");
-#else
-        TORCH_CHECK(false, "Rebuild with FLASH_KDA_ENABLE_SM100_V0=1 to enable sm100_v0");
-#endif
-    }
-    if (use_v1a) {
-#if defined(FLASH_KDA_ENABLE_V1A)
-        TORCH_CHECK(has_state_in && has_state_out && !state_fp32 && !cu_seqlens.has_value(),
-                    "v1a currently requires fixed-length BF16 initial_state and final_state");
-#else
-        TORCH_CHECK(false, "Rebuild with FLASH_KDA_ENABLE_V1A=1 to enable v1a");
-#endif
-    }
+    const std::string k2_impl_name = requested_k2 ? requested_k2 : "baseline";
+    const auto k2_mode = flash_kda::parse_k2_mode(k2_impl_name);
+    TORCH_CHECK(k2_mode != flash_kda::K2Mode::Invalid,
+                "FLASH_KDA_K2_IMPL must be auto, baseline, sm100_v0, or v1a");
 
     // Flatten [B, T, H, D] -> [B*T, H, D] (contiguous, same data pointer)
     auto q_3d = q.reshape({T_total, H, D});
@@ -189,6 +169,51 @@ void fwd(
     } else {
         N_val = B;
     }
+
+    int compute_major = 0, compute_minor = 0;
+    if (k2_mode != flash_kda::K2Mode::Baseline) {
+        TORCH_CHECK(
+            cudaDeviceGetAttribute(&compute_major, cudaDevAttrComputeCapabilityMajor,
+                                   q.get_device()) == cudaSuccess &&
+            cudaDeviceGetAttribute(&compute_minor, cudaDevAttrComputeCapabilityMinor,
+                                   q.get_device()) == cudaSuccess,
+            "Cannot query CUDA device capability for K2 implementation selection");
+    }
+
+    flash_kda::K2DispatchConfig k2_config;
+#if defined(FLASH_KDA_ENABLE_SM100_V0)
+    k2_config.v0_compiled = true;
+#endif
+#if defined(FLASH_KDA_ENABLE_V1A)
+    k2_config.v1a_compiled = true;
+#endif
+    k2_config.compute_major = compute_major;
+    k2_config.compute_minor = compute_minor;
+    k2_config.is_varlen = is_varlen;
+    k2_config.has_state_in = has_state_in;
+    k2_config.has_state_out = has_state_out;
+    k2_config.state_fp32 = state_fp32;
+    k2_config.total_tokens = T_total;
+    k2_config.sequences = N_val;
+
+    const auto k2_implementation =
+        flash_kda::select_k2_implementation(k2_mode, k2_config);
+    if (k2_implementation == flash_kda::K2Implementation::Unsupported) {
+        if (k2_mode == flash_kda::K2Mode::SM100V0) {
+            TORCH_CHECK(k2_config.v0_compiled,
+                        "Rebuild with FLASH_KDA_ENABLE_SM100_V0=1 to enable sm100_v0");
+            TORCH_CHECK(false,
+                        "sm100_v0 requires SM100/SM103; use baseline on other architectures");
+        }
+        TORCH_CHECK(k2_config.v1a_compiled,
+                    "Rebuild with FLASH_KDA_ENABLE_V1A=1 to enable v1a");
+        TORCH_CHECK(false,
+                    "v1a requires SM103 and fixed-length BF16 initial_state and final_state");
+    }
+    const bool use_sm100_v0 =
+        k2_implementation == flash_kda::K2Implementation::SM100V0;
+    const bool use_v1a =
+        k2_implementation == flash_kda::K2Implementation::V1A;
 
     // Validate state shapes: always [N, H, D, D]
     if (has_state_in) {

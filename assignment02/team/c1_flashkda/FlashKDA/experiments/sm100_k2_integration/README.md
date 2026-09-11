@@ -200,11 +200,10 @@ BF16, and converts it back for the next chunk. Initial/final state use direct,
 coalesced GMEM access at recurrence boundaries. No full-state staging or
 CTA-wide barrier was added.
 
-Local SM103a compilation reports 137 registers/thread, 62,464 bytes dynamic
-SMEM, zero stack, and zero spill loads/stores. Compared with the matching
-baseline specialization, this removes 35,968 bytes of dynamic SMEM. These are
-compiler/layout results only; the recurrence ladder and latency remain pending
-on B300.
+SM103a compilation reports 137 registers/thread, 62,464 bytes dynamic SMEM,
+zero stack, and zero spill loads/stores. Compared with the matching baseline
+specialization, this removes 35,968 bytes of dynamic SMEM. The B300 recurrence
+ladder passed through 128 chunks.
 
 For an isolated, paired production-K2 timing, keep the V0 comparator intact and
 build the V1a-specific comparator against a V1a launcher object:
@@ -248,10 +247,10 @@ ncu --section LaunchStats --section Occupancy \
   --batch 8 --tokens 1024 --warmup 1 --iters 1 --rounds 1
 ```
 
-For the V1a kernel, first require approximately 200.7 KiB Shared Memory
-Configuration Size and `Block Limit Shared Mem >= 3`. Registers remain 137 and
-should still report `Block Limit Registers = 2`; performance and waves are not
-expected to improve from this carveout-only experiment. Rebuild both
+On B300 the V1a kernel reports 233.47 KiB Shared Memory Configuration Size and
+`Block Limit Shared Mem = 3`. Registers remain 137 and report
+`Block Limit Registers = 2`; performance and waves do not improve from this
+carveout-only change. Rebuild both
 `fwd_v1a.o` and `k2_compare_v1a` before profiling because the preference is set
 by the host launcher.
 
@@ -262,4 +261,34 @@ initial load and final store, transposing each tile. Both boundaries now swap
 those coordinate components. The host checker uses coordinate-coded tiles to
 require exact baseline C-to-B `MOVM_T` mapping, B-to-C-to-B roundtrip, full
 128x128 register ownership, and B-fragment-to-GMEM logical indexing. The B300
-recurrence ladder must be rerun after this fix before considering V1a correct.
+recurrence ladder passed after this fix.
+
+## Production K2 dispatch
+
+`FLASH_KDA_K2_IMPL` accepts `baseline`, `sm100_v0`, `v1a`, and `auto`. If the
+variable is unset, the established `baseline` default is preserved. `sm100_v0`
+remains an explicit experiment and is never selected by `auto`.
+
+`v1a` forces the V1a specialization when it was compiled and the call uses an
+SM103 device, fixed-length execution, and BF16 initial and final state. `auto`
+uses the same support checks and additionally requires at least 128 chunks per
+sequence. With a 16-token chunk, the fixed-length condition is:
+
+```text
+sequence_length = T_total / N
+chunks_per_sequence = sequence_length / 16
+chunks_per_sequence >= 128
+```
+
+Unsupported `auto` calls fall back to baseline. Unsupported explicit `v1a` or
+`sm100_v0` requests report an error instead of silently changing the requested
+implementation. Varlen calls always use baseline under `auto`.
+
+The dispatch policy is independent of CUDA and can be tested on the host:
+
+```bash
+g++ -std=c++17 -Icsrc \
+  experiments/sm100_k2_integration/test_k2_dispatch.cpp \
+  -o experiments/sm100_k2_integration/build/test_k2_dispatch
+experiments/sm100_k2_integration/build/test_k2_dispatch
+```
