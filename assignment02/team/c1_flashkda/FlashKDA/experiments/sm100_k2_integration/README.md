@@ -206,6 +206,33 @@ baseline specialization, this removes 35,968 bytes of dynamic SMEM. These are
 compiler/layout results only; the recurrence ladder and latency remain pending
 on B300.
 
+For an isolated, paired production-K2 timing, keep the V0 comparator intact and
+build the V1a-specific comparator against a V1a launcher object:
+
+```bash
+nvcc -std=c++17 -O3 -lineinfo -arch=sm_103a \
+  --expt-relaxed-constexpr --expt-extended-lambda --use_fast_math \
+  --ptxas-options=-v,--register-usage-level=10,--warn-on-spills \
+  -DFLASH_KDA_ENABLE_V1A=1 -Icutlass/include -Icsrc \
+  -c csrc/smxx/fwd_launch.cu \
+  -o experiments/sm100_k2_integration/build/fwd_v1a.o
+nvcc -std=c++17 -O3 -lineinfo -arch=sm_103a \
+  --expt-relaxed-constexpr --expt-extended-lambda \
+  -Icutlass/include -Icsrc \
+  experiments/sm100_k2_integration/k2_compare_v1a.cu \
+  experiments/sm100_k2_integration/build/fwd_v1a.o \
+  -o experiments/sm100_k2_integration/build/k2_compare_v1a
+experiments/sm100_k2_integration/build/k2_compare_v1a \
+  --batch 4 --tokens 2048 --warmup 30 --iters 200 --rounds 5
+```
+
+This comparator invokes the specializations directly; it does not read
+`FLASH_KDA_K2_IMPL`. Before interpreting latency, require the per-round JSON to
+identify baseline as 73 registers / 98,432 bytes SMEM and V1a as 137 registers /
+62,464 bytes SMEM. A 163-register / 110,848-byte second path is V0 and invalidates
+the comparison. Exact full-output and final-state equality is checked before and
+after timing.
+
 The first B300 structured-pattern run localized an error to the 16x16 tile
 interior. `partition_B(identity)` for the SM80 TN atom exposes its identity
 coordinate as `(N,K)`. V1a initially interpreted it as `(K,N)` in the direct
