@@ -70,21 +70,36 @@ int main() {
         for (int i = 0; i < 8; ++i) {
             auto cc = c(i), bc = b(i);
             c_values[lane][i] = int(get<0>(cc)) * 16 + int(get<1>(cc)); // key,value
-            b_values[lane][i] = int(get<1>(bc)) * 16 + int(get<0>(bc)); // B: value,key
+            // For this TN atom CuTe exposes the B identity coordinate as
+            // (N,K), so convert it to the shared logical (K,N) tag.
+            b_values[lane][i] = int(get<1>(bc)) * 16 + int(get<0>(bc));
         }
     }
+    int b_from_c[32][8], c_roundtrip[32][8];
     for (int lane = 0; lane < 32; ++lane) for (int word = 0; word < 4; ++word)
         for (int half = 0; half < 2; ++half) {
             const int row = lane / 4, col = (lane % 4) * 2 + half;
             const int source_lane = col * 4 + row / 2, source_half = row % 2;
-            assert(c_values[source_lane][word * 2 + source_half] == b_values[lane][word * 2 + half]);
+            b_from_c[lane][word * 2 + half] = c_values[source_lane][word * 2 + source_half];
+            assert(b_from_c[lane][word * 2 + half] == b_values[lane][word * 2 + half]);
         }
+    // MOVM_T is the inverse distribution change as well: B -> C -> B (and
+    // C -> B -> C) must preserve every coordinate-coded element bit-for-bit.
+    for (int lane = 0; lane < 32; ++lane) for (int word = 0; word < 4; ++word)
+        for (int half = 0; half < 2; ++half) {
+            const int row = lane / 4, col = (lane % 4) * 2 + half;
+            const int source_lane = col * 4 + row / 2, source_half = row % 2;
+            c_roundtrip[lane][word * 2 + half] = b_from_c[source_lane][word * 2 + source_half];
+            assert(c_roundtrip[lane][word * 2 + half] == c_values[lane][word * 2 + half]);
+        }
+    // Direct-GMEM V1a load/store must use the same (K,N) tags as baseline
+    // C->MOVM_T->B. This catches the former tile-local transpose explicitly.
     std::array<int, 128 * 128> register_visits{};
     for (int warp = 0; warp < 4; ++warp) for (int bi = 0; bi < 2; ++bi)
         for (int kb = 0; kb < 8; ++kb) for (int lane = 0; lane < 32; ++lane)
             for (int i = 0; i < 8; ++i) {
-                int key = kb * 16 + b_values[lane][i] % 16;
-                int value = (warp * 2 + bi) * 16 + b_values[lane][i] / 16;
+                int key = kb * 16 + b_values[lane][i] / 16;
+                int value = (warp * 2 + bi) * 16 + b_values[lane][i] % 16;
                 ++register_visits[value * 128 + key];
             }
     for (int count : register_visits) assert(count == 1);

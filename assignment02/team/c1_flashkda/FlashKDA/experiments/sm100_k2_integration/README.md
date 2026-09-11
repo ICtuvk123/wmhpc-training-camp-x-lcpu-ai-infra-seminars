@@ -205,3 +205,12 @@ SMEM, zero stack, and zero spill loads/stores. Compared with the matching
 baseline specialization, this removes 35,968 bytes of dynamic SMEM. These are
 compiler/layout results only; the recurrence ladder and latency remain pending
 on B300.
+
+The first B300 structured-pattern run localized an error to the 16x16 tile
+interior. `partition_B(identity)` for the SM80 TN atom exposes its identity
+coordinate as `(N,K)`. V1a initially interpreted it as `(K,N)` in the direct
+initial load and final store, transposing each tile. Both boundaries now swap
+those coordinate components. The host checker uses coordinate-coded tiles to
+require exact baseline C-to-B `MOVM_T` mapping, B-to-C-to-B roundtrip, full
+128x128 register ownership, and B-fragment-to-GMEM logical indexing. The B300
+recurrence ladder must be rerun after this fix before considering V1a correct.

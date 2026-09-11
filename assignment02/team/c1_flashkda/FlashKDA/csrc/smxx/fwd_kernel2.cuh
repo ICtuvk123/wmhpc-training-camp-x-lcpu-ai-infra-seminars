@@ -522,8 +522,12 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
 #pragma unroll
                     for (int i = 0; i < size(state_regs[bi][kb]); ++i) {
                         auto coord = coords(i);
-                        int key = kb * 16 + int(get<0>(coord));
-                        int value = (state_warp * 2 + bi) * 16 + int(get<1>(coord));
+                        // CuTe's B identity coordinates are exposed as (N,K)
+                        // for this TN atom. Match the baseline C->MOVM_T->B
+                        // distribution; treating them as (K,N) transposes
+                        // every 16x16 state tile.
+                        int key = kb * 16 + int(get<1>(coord));
+                        int value = (state_warp * 2 + bi) * 16 + int(get<0>(coord));
                         state_regs[bi][kb](i) = state_ptr[value * D + key];
                     }
                 }
@@ -922,8 +926,8 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
 #pragma unroll
                     for (int i = 0; i < size(state_regs[bi][kb]); ++i) {
                         auto coord = coords(i);
-                        int key = kb * 16 + int(get<0>(coord));
-                        int value = (state_warp * 2 + bi) * 16 + int(get<1>(coord));
+                        int key = kb * 16 + int(get<1>(coord));
+                        int value = (state_warp * 2 + bi) * 16 + int(get<0>(coord));
                         state_ptr[value * D + key] = state_regs[bi][kb](i);
                     }
                 }
