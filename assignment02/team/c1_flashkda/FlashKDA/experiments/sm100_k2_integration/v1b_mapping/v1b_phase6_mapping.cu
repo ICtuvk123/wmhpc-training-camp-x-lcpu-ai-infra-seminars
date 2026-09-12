@@ -50,6 +50,140 @@ struct SharedStorage {
 
 static_assert(cosize_v<BLayout> * sizeof(BF16) == K * N * sizeof(BF16));
 
+struct TopologyResult {
+  std::string copy_op;
+  int register_values_per_thread;
+  int same_thread;
+  int same_warp_different_lane;
+  int different_warp;
+  int missing;
+  int duplicate;
+  int warp_transfer_matrix[4][4];
+};
+
+template <class CopyOp>
+TopologyResult inspect_topology(char const* name) {
+  auto umma = make_umma();
+  auto cta = umma.get_slice(Int<0>{});
+  Tensor c = make_tensor(make_gmem_ptr(static_cast<float*>(nullptr)),
+      make_layout(make_shape(Int<M>{}, Int<N>{}), LayoutRight{}));
+  Tensor tCgC = cta.partition_C(c);
+  Tensor tCtAcc = cta.make_fragment_C(tCgC);
+  tCtAcc.data() = 0;
+  auto logical = make_identity_tensor(make_shape(Int<M>{}, Int<N>{}));
+  Tensor tCgCoord = cta.partition_C(logical);
+  auto tmem_copy = make_tmem_copy(CopyOp{}, tCtAcc);
+
+  int src_owner[M*N];
+  int dst_owner[M*N];
+  std::fill_n(src_owner,M*N,-1);
+  std::fill_n(dst_owner,M*N,-1);
+  int values_per_thread=-1;
+  int duplicate=0;
+  for(int tid=0;tid<ComputeThreads;++tid) {
+    auto tmem_thr=tmem_copy.get_slice(tid);
+    Tensor coords=tmem_thr.partition_D(tCgCoord);
+    if(values_per_thread<0) values_per_thread=size(coords);
+    for(int slot=0;slot<size(coords);++slot) {
+      auto coord=coords(slot);
+      int row=int(get<0>(coord)),col=int(get<1>(coord));
+      int logical_idx=row*N+col;
+      duplicate += src_owner[logical_idx]>=0;
+      src_owner[logical_idx]=tid;
+    }
+
+    int warp=tid/32,lane=tid%32;
+    auto sm80=make_tiled_mma(MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>{},
+                             Layout<Shape<_1,_1>>{},Tile<_16,_16,_16>{});
+    auto sm80_thr=sm80.get_slice(lane);
+    auto identity16=make_identity_tensor(make_shape(Int<16>{},Int<16>{}));
+    auto coords_b=sm80_thr.partition_B(identity16);
+    for(int bi=0;bi<2;++bi) for(int kb=0;kb<8;++kb) for(int i=0;i<size(coords_b);++i) {
+      auto coord=coords_b(i);
+      int row=kb*16+int(get<1>(coord));
+      int col=(warp*2+bi)*16+int(get<0>(coord));
+      int logical_idx=row*N+col;
+      duplicate += dst_owner[logical_idx]>=0;
+      dst_owner[logical_idx]=tid;
+    }
+  }
+
+  TopologyResult result{name,values_per_thread,0,0,0,0,duplicate,{}};
+  for(int logical_idx=0;logical_idx<M*N;++logical_idx) {
+    int src=src_owner[logical_idx],dst=dst_owner[logical_idx];
+    if(src<0||dst<0){++result.missing;continue;}
+    if(src==dst) ++result.same_thread;
+    else if(src/32==dst/32) ++result.same_warp_different_lane;
+    else ++result.different_warp;
+    ++result.warp_transfer_matrix[src/32][dst/32];
+  }
+  return result;
+}
+
+void print_topology(TopologyResult const& r) {
+  std::printf("{\"topology_sweep\":true,\"copy_op\":\"%s\","
+      "\"register_values_per_thread\":%d,\"same_thread\":%d,"
+      "\"local_bytes_per_thread\":-1,"
+      "\"same_warp_different_lane\":%d,\"different_warp\":%d,"
+      "\"missing\":%d,\"duplicate\":%d,"
+      "\"warp_transfer_matrix\":[[%d,%d,%d,%d],[%d,%d,%d,%d],"
+      "[%d,%d,%d,%d],[%d,%d,%d,%d]]}\n",
+      r.copy_op.c_str(),r.register_values_per_thread,r.same_thread,
+      r.same_warp_different_lane,r.different_warp,r.missing,r.duplicate,
+      r.warp_transfer_matrix[0][0],r.warp_transfer_matrix[0][1],r.warp_transfer_matrix[0][2],r.warp_transfer_matrix[0][3],
+      r.warp_transfer_matrix[1][0],r.warp_transfer_matrix[1][1],r.warp_transfer_matrix[1][2],r.warp_transfer_matrix[1][3],
+      r.warp_transfer_matrix[2][0],r.warp_transfer_matrix[2][1],r.warp_transfer_matrix[2][2],r.warp_transfer_matrix[2][3],
+      r.warp_transfer_matrix[3][0],r.warp_transfer_matrix[3][1],r.warp_transfer_matrix[3][2],r.warp_transfer_matrix[3][3]);
+}
+
+#define INSPECT(OP) results.push_back(inspect_topology<OP>(#OP))
+std::vector<TopologyResult> run_topology_sweep() {
+  std::vector<TopologyResult> results;
+  INSPECT(SM100_TMEM_LOAD_32dp32b1x);
+  INSPECT(SM100_TMEM_LOAD_32dp32b2x);
+  INSPECT(SM100_TMEM_LOAD_32dp32b4x);
+  INSPECT(SM100_TMEM_LOAD_32dp32b8x);
+  INSPECT(SM100_TMEM_LOAD_32dp32b16x);
+  INSPECT(SM100_TMEM_LOAD_32dp32b32x);
+  INSPECT(SM100_TMEM_LOAD_32dp32b64x);
+  INSPECT(SM100_TMEM_LOAD_32dp32b128x);
+  INSPECT(SM100_TMEM_LOAD_16dp256b1x);
+  INSPECT(SM100_TMEM_LOAD_16dp128b1x);
+  INSPECT(SM100_TMEM_LOAD_16dp128b2x);
+  INSPECT(SM100_TMEM_LOAD_16dp64b1x);
+  INSPECT(SM100_TMEM_LOAD_16dp64b2x);
+  INSPECT(SM100_TMEM_LOAD_16dp64b4x);
+  INSPECT(SM100_TMEM_LOAD_16dp32b1x);
+  INSPECT(SM100_TMEM_LOAD_16dp32b2x);
+  INSPECT(SM100_TMEM_LOAD_16dp32b4x);
+  INSPECT(SM100_TMEM_LOAD_16dp32b8x);
+  for(auto const& r:results) print_topology(r);
+  // Primary: fewer cross-warp elements. Secondary: more direct ownership.
+  std::stable_sort(results.begin(),results.end(),[](auto const& a,auto const& b){
+    bool av=a.missing==0&&a.duplicate==0,bv=b.missing==0&&b.duplicate==0;
+    if(av!=bv) return av>bv;
+    if(a.different_warp!=b.different_warp) return a.different_warp<b.different_warp;
+    if(a.same_thread!=b.same_thread) return a.same_thread>b.same_thread;
+    return a.register_values_per_thread<b.register_values_per_thread;
+  });
+  for(size_t rank=0;rank<results.size();++rank)
+    std::printf("{\"topology_rank\":%zu,\"copy_op\":\"%s\",\"different_warp\":%d,"
+                "\"same_thread\":%d,\"register_values_per_thread\":%d}\n",
+                rank+1,results[rank].copy_op.c_str(),results[rank].different_warp,
+                results[rank].same_thread,results[rank].register_values_per_thread);
+  auto const& best=results.front();
+  int baseline_cross=0;
+  for(auto const& r:results) if(r.copy_op=="SM100_TMEM_LOAD_32dp32b1x") baseline_cross=r.different_warp;
+  char const* decision=best.different_warp==0 ? "REGISTER_SHUFFLE_CANDIDATE"
+      : best.different_warp*10<baseline_cross*9 ? "MATERIALLY_REDUCED_CROSS_WARP"
+                                               : "ALL_TO_ALL_CROSS_WARP_INTRINSIC";
+  std::printf("{\"topology_decision\":\"%s\",\"best_copy_op\":\"%s\","
+              "\"best_different_warp\":%d,\"baseline_different_warp\":%d}\n",
+              decision,best.copy_op.c_str(),best.different_warp,baseline_cross);
+  return results;
+}
+#undef INSPECT
+
 __global__ void v1b_mapping_kernel(
     BF16 const* kt, BF16 const* u, BF16 const* initial, float const* decay,
     float* product, BF16* updated, int* a_owner, int* u_owner, int* tmem_owner,
@@ -242,14 +376,19 @@ __global__ void v1b_mapping_kernel(
 
 int main(int argc, char** argv) {
   int warmup = 1, iters = 1;
+  bool topology_only = false;
   std::string dump_ownership;
-  for (int i = 1; i < argc; i += 2) {
-    if (i + 1 >= argc) return 2;
-    if (!std::strcmp(argv[i], "--dump-ownership")) dump_ownership = argv[i + 1];
-    else if (!std::strcmp(argv[i], "--warmup")) warmup = std::atoi(argv[i + 1]);
-    else if (!std::strcmp(argv[i], "--iters")) iters = std::atoi(argv[i + 1]);
+  for (int i = 1; i < argc;) {
+    if (!std::strcmp(argv[i], "--topology-only")) { topology_only = true; ++i; }
+    else if (i + 1 >= argc) return 2;
+    else if (!std::strcmp(argv[i], "--dump-ownership")) { dump_ownership = argv[i + 1]; i += 2; }
+    else if (!std::strcmp(argv[i], "--warmup")) { warmup = std::atoi(argv[i + 1]); i += 2; }
+    else if (!std::strcmp(argv[i], "--iters")) { iters = std::atoi(argv[i + 1]); i += 2; }
     else return 2;
   }
+  auto topology_results=run_topology_sweep();
+  (void)topology_results;
+  if (topology_only) return 0;
   int dev; cudaDeviceProp prop{};
   CHECK_CUDA(cudaGetDevice(&dev)); CHECK_CUDA(cudaGetDeviceProperties(&prop, dev));
   if (prop.major != 10 || prop.minor != 3) return 3;

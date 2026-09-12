@@ -22,6 +22,13 @@ experiments/sm100_k2_integration/v1b_mapping/build/v1b_phase6_mapping \
   --dump-ownership experiments/sm100_k2_integration/v1b_mapping/ownership.csv
 ```
 
+Run only the host/static ownership sweep (no diagnostic kernel launch):
+
+```bash
+experiments/sm100_k2_integration/v1b_mapping/build/v1b_phase6_mapping \
+  --topology-only
+```
+
 The probe reports `DIRECT` only if TMEM and persistent-state ownership match
 for every logical element and the sparse exact product and BF16 state update
 both match bitwise. Any missing, duplicate, cross-thread, or unmapped element
@@ -44,3 +51,24 @@ compute barriers per tile. The output also reports the 8,192-byte 16x128 strip
 alternative, which needs 16 barriers for the full matrix. This is a mapping
 feasibility result; the probe's 255-register diagnostic latency is not a
 production performance result.
+
+Before the numerical probe, the executable performs a host/static topology
+sweep over the legal non-packed FP32 TMEM load families exposed by CUTLASS:
+
+```text
+SM100_TMEM_LOAD_32dp32b{1,2,4,8,16,32,64,128}x
+SM100_TMEM_LOAD_16dp256b1x
+SM100_TMEM_LOAD_16dp128b{1,2}x
+SM100_TMEM_LOAD_16dp64b{1,2,4}x
+SM100_TMEM_LOAD_16dp32b{1,2,4,8}x
+```
+
+The `_16b` forms are excluded because they change value packing and do not
+match the FP32 accumulator. Each candidate must instantiate through
+`make_tmem_copy` for the unchanged accumulator and produce a complete,
+duplicate-free ownership map. Candidates are ranked by cross-warp count,
+direct ownership, then register values per thread. These are static topology
+records, so `local_bytes_per_thread` is reported as `-1`.
+
+The final topology decision is `REGISTER_SHUFFLE_CANDIDATE`,
+`MATERIALLY_REDUCED_CROSS_WARP`, or `ALL_TO_ALL_CROSS_WARP_INTRINSIC`.
