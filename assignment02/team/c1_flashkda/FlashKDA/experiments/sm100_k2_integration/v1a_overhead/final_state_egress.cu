@@ -209,7 +209,7 @@ int main(int argc,char** argv) {
                 result[which].attr.localSizeBytes,smem_bytes);
   }
   double mean[6]; for(int i=0;i<6;++i) mean[i]=result[i].sum/rounds;
-  double launch=mean[0],baseline=mean[2]-mean[1],direct=mean[4]-mean[3],staged=mean[5]-mean[3];
+  double launch_us=mean[0],baseline=mean[2]-mean[1],direct=mean[4]-mean[3],staged=mean[5]-mean[3];
   double recovered=mean[4]-mean[5];
   const char* decision=recovered>=8.0?"GO":recovered>=2.0?"LOW_ROI":"NO_GAIN";
   std::printf("{\"summary\":true,\"correct\":%s,\"launch_us\":%.6f,"
@@ -219,7 +219,7 @@ int main(int argc,char** argv) {
       "\"v1a_staged_minus_baseline_us\":%.6f,\"staged_vs_direct_speedup\":%.6f,"
       "\"recovered_us\":%.6f,\"staging_smem_bytes\":%zu,\"barriers\":1,"
       "\"FINAL_EGRESS_OPTIMIZATION\":\"%s\"}\n",
-      correct?"true":"false",launch,mean[1]-launch,mean[3]-launch,baseline,direct,staged,
+      correct?"true":"false",launch_us,mean[1]-launch_us,mean[3]-launch_us,baseline,direct,staged,
       direct-baseline,staged-baseline,mean[4]/mean[5],recovered,smem_bytes,decision);
   cudaEventDestroy(start); cudaEventDestroy(stop); cudaStreamDestroy(stream);
   cudaFree(input); cudaFree(output); return correct?0:4;
