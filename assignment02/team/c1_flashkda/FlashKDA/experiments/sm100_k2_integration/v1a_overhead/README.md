@@ -61,6 +61,12 @@ process with alternating timing:
 - the same V1a fragments staged once into 32 KiB BF16 SMEM, followed by the
   same TMA store used by baseline.
 
+The physical SMEM allocation has two CuTe views. `StateSmemLayout` is used
+only for logical 128x128 cooperative reads/writes. The TMA copy source uses
+the production-rank `TMAStateSmemLayout`, preserving its singleton and
+hierarchical modes. Baseline and staged variants share this exact TMA source
+view, descriptor, partition, issue, arrive, and wait path.
+
 Because shared memory cannot persist across kernel launches, the baseline
 probe reports its SMEM preparation separately and subtracts it. V1a likewise
 reports the identical register-load prefix separately. Direct versus staged

@@ -24,7 +24,10 @@ template<Mode mode,class TmaStore>
 __global__ void egress_kernel(CUTE_GRID_CONSTANT TmaStore const tma_store,
                               BF16 const* input,BF16* output) {
   extern __shared__ __align__(128) BF16 storage[];
+  // Keep a logical 128x128 view for cooperative writes and a distinct
+  // production-rank TMA view over the same physical 32 KiB allocation.
   Tensor s_state=make_tensor(make_smem_ptr(storage),StateLayout{});
+  Tensor s_state_tma=make_tensor(make_smem_ptr(storage),TMAStateLayout{});
   const int tid=int(threadIdx.x);
   if constexpr(mode==Mode::Empty) return;
 
@@ -101,7 +104,7 @@ __global__ void egress_kernel(CUTE_GRID_CONSTANT TmaStore const tma_store,
       Tensor tile=make_tensor(g.data()+off,
           make_layout(make_shape(Int<1>{},Int<D>{},Int<D>{}),stride(g.layout())));
       auto cta=tma_store.get_slice(Int<0>{});
-      cute::copy(tma_store,cta.partition_S(s_state),cta.partition_D(tile));
+      cute::copy(tma_store,cta.partition_S(s_state_tma),cta.partition_D(tile));
       tma_store_arrive();
       tma_store_wait<0>();
     }
