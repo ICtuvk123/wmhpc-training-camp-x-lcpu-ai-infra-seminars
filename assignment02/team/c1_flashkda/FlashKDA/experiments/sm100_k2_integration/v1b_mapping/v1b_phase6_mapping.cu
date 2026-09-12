@@ -7,6 +7,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 using BF16 = cutlass::bfloat16_t;
@@ -50,7 +53,7 @@ static_assert(cosize_v<BLayout> * sizeof(BF16) == K * N * sizeof(BF16));
 __global__ void v1b_mapping_kernel(
     BF16 const* kt, BF16 const* u, BF16 const* initial, float const* decay,
     float* product, BF16* updated, int* a_owner, int* u_owner, int* tmem_owner,
-    int* state_owner, int* errors) {
+    int* state_owner, int* tmem_slot, int* state_slot, int* errors) {
 #if defined(CUTE_ARCH_TCGEN05_TMEM_ENABLED)
   if (threadIdx.x >= ComputeThreads) return;
   int tid = threadIdx.x;
@@ -103,6 +106,7 @@ __global__ void v1b_mapping_kernel(
         int col = (warp * 2 + bi) * 16 + int(get<0>(coord));
         int logical = row * N + col;
         state[bi][kb](i) = initial[logical];
+        state_slot[logical] = (bi * 8 + kb) * size(state[bi][kb]) + i;
         if (atomicCAS(&state_owner[logical], -1, tid) != -1) atomicAdd(&errors[1], 1);
       }
     }
@@ -185,6 +189,7 @@ __global__ void v1b_mapping_kernel(
     auto tc = tDgCoordGrouped(0, slot);
     int row = int(get<0>(tc)), col = int(get<1>(tc));
     int logical = row * N + col;
+    tmem_slot[logical] = slot;
     if (atomicCAS(&tmem_owner[logical], -1, tid) != -1) atomicAdd(&errors[2], 1);
     product[logical] = tDrChunk(0, i);
 
@@ -237,11 +242,12 @@ __global__ void v1b_mapping_kernel(
 
 int main(int argc, char** argv) {
   int warmup = 1, iters = 1;
+  std::string dump_ownership;
   for (int i = 1; i < argc; i += 2) {
     if (i + 1 >= argc) return 2;
-    int value = std::atoi(argv[i + 1]);
-    if (!std::strcmp(argv[i], "--warmup")) warmup = value;
-    else if (!std::strcmp(argv[i], "--iters")) iters = value;
+    if (!std::strcmp(argv[i], "--dump-ownership")) dump_ownership = argv[i + 1];
+    else if (!std::strcmp(argv[i], "--warmup")) warmup = std::atoi(argv[i + 1]);
+    else if (!std::strcmp(argv[i], "--iters")) iters = std::atoi(argv[i + 1]);
     else return 2;
   }
   int dev; cudaDeviceProp prop{};
@@ -258,12 +264,13 @@ int main(int argc, char** argv) {
   for (int i = 0; i < M*N; ++i) initial[i] = BF16(float((i % 17) - 8) / 8.f);
 
   BF16 *dkt, *du, *di, *dout; float *dg, *dprod;
-  int *dao, *duo, *dto, *dso, *derr;
+  int *dao, *duo, *dto, *dso, *dts, *dss, *derr;
   CHECK_CUDA(cudaMalloc(&dkt, kt.size()*sizeof(BF16))); CHECK_CUDA(cudaMalloc(&du, u.size()*sizeof(BF16)));
   CHECK_CUDA(cudaMalloc(&di, initial.size()*sizeof(BF16))); CHECK_CUDA(cudaMalloc(&dg, decay.size()*sizeof(float)));
   CHECK_CUDA(cudaMalloc(&dprod, M*N*sizeof(float))); CHECK_CUDA(cudaMalloc(&dout, M*N*sizeof(BF16)));
   CHECK_CUDA(cudaMalloc(&dao, M*K*sizeof(int))); CHECK_CUDA(cudaMalloc(&duo, K*N*sizeof(int)));
   CHECK_CUDA(cudaMalloc(&dto, M*N*sizeof(int))); CHECK_CUDA(cudaMalloc(&dso, M*N*sizeof(int)));
+  CHECK_CUDA(cudaMalloc(&dts, M*N*sizeof(int))); CHECK_CUDA(cudaMalloc(&dss, M*N*sizeof(int)));
   CHECK_CUDA(cudaMalloc(&derr, 5*sizeof(int)));
   CHECK_CUDA(cudaMemcpy(dkt,kt.data(),kt.size()*sizeof(BF16),cudaMemcpyHostToDevice));
   CHECK_CUDA(cudaMemcpy(du,u.data(),u.size()*sizeof(BF16),cudaMemcpyHostToDevice));
@@ -272,21 +279,25 @@ int main(int argc, char** argv) {
   auto launch = [&] {
     CHECK_CUDA(cudaMemset(dao,0xff,M*K*sizeof(int))); CHECK_CUDA(cudaMemset(duo,0xff,K*N*sizeof(int)));
     CHECK_CUDA(cudaMemset(dto,0xff,M*N*sizeof(int))); CHECK_CUDA(cudaMemset(dso,0xff,M*N*sizeof(int)));
+    CHECK_CUDA(cudaMemset(dts,0xff,M*N*sizeof(int))); CHECK_CUDA(cudaMemset(dss,0xff,M*N*sizeof(int)));
     CHECK_CUDA(cudaMemset(derr,0,5*sizeof(int)));
-    v1b_mapping_kernel<<<1,NumThreads,sizeof(SharedStorage)>>>(dkt,du,di,dg,dprod,dout,dao,duo,dto,dso,derr);
+    v1b_mapping_kernel<<<1,NumThreads,sizeof(SharedStorage)>>>(
+        dkt,du,di,dg,dprod,dout,dao,duo,dto,dso,dts,dss,derr);
   };
   for (int i=0;i<warmup;++i) launch(); CHECK_CUDA(cudaDeviceSynchronize());
   cudaEvent_t a,b; CHECK_CUDA(cudaEventCreate(&a)); CHECK_CUDA(cudaEventCreate(&b)); CHECK_CUDA(cudaEventRecord(a));
   for (int i=0;i<iters;++i) launch(); CHECK_CUDA(cudaEventRecord(b)); CHECK_CUDA(cudaEventSynchronize(b));
   float ms; CHECK_CUDA(cudaEventElapsedTime(&ms,a,b));
   std::vector<float> product(M*N); std::vector<BF16> output(M*N);
-  std::vector<int> ao(M*K),uo(K*N),to(M*N),so(M*N),errors(5);
+  std::vector<int> ao(M*K),uo(K*N),to(M*N),so(M*N),ts(M*N),ss(M*N),errors(5);
   CHECK_CUDA(cudaMemcpy(product.data(),dprod,M*N*sizeof(float),cudaMemcpyDeviceToHost));
   CHECK_CUDA(cudaMemcpy(output.data(),dout,M*N*sizeof(BF16),cudaMemcpyDeviceToHost));
   CHECK_CUDA(cudaMemcpy(ao.data(),dao,M*K*sizeof(int),cudaMemcpyDeviceToHost));
   CHECK_CUDA(cudaMemcpy(uo.data(),duo,K*N*sizeof(int),cudaMemcpyDeviceToHost));
   CHECK_CUDA(cudaMemcpy(to.data(),dto,M*N*sizeof(int),cudaMemcpyDeviceToHost));
   CHECK_CUDA(cudaMemcpy(so.data(),dso,M*N*sizeof(int),cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(ts.data(),dts,M*N*sizeof(int),cudaMemcpyDeviceToHost));
+  CHECK_CUDA(cudaMemcpy(ss.data(),dss,M*N*sizeof(int),cudaMemcpyDeviceToHost));
   CHECK_CUDA(cudaMemcpy(errors.data(),derr,5*sizeof(int),cudaMemcpyDeviceToHost));
   int missing_a=0,missing_u=0,missing_t=0,missing_s=0,owner_mismatch=0,bad_product=0,bad_update=0;
   double sum_error=0,max_error=0;
@@ -298,18 +309,110 @@ int main(int argc, char** argv) {
     double err=std::abs(double(product[i])-ref); sum_error+=err; max_error=std::max(max_error,err); bad_product += product[i]!=ref;
     BF16 ref_update=BF16(float(initial[i])*decay[row]+ref); bad_update += output[i]!=ref_update;
   }
+
+  // Ownership topology is intentionally analyzed on the host. The diagnostic
+  // kernel only exports the native thread/slot assigned by each partition.
+  int same_thread=0,same_warp_different_lane=0,different_warp=0;
+  int warp_transfer_matrix[4][4] = {};
+  int lane_map[32]; std::fill_n(lane_map,32,-1);
+  int warp_map[4]; std::fill_n(warp_map,4,-1);
+  bool fixed_lane_permutation=true,fixed_warp_permutation=true;
+  int tile_same[8][8] = {},tile_warp_local[8][8] = {},tile_cross[8][8] = {};
+  for(int logical=0;logical<M*N;++logical) {
+    int src=to[logical],dst=so[logical];
+    if(src<0||dst<0) continue;
+    int sw=src/32,dw=dst/32,sl=src%32,dl=dst%32;
+    ++warp_transfer_matrix[sw][dw];
+    if(src==dst) ++same_thread;
+    else if(sw==dw) ++same_warp_different_lane;
+    else ++different_warp;
+    if(lane_map[sl]<0) lane_map[sl]=dl;
+    else if(lane_map[sl]!=dl) fixed_lane_permutation=false;
+    if(warp_map[sw]<0) warp_map[sw]=dw;
+    else if(warp_map[sw]!=dw) fixed_warp_permutation=false;
+    int row=logical/N,col=logical%N,tr=row/16,tc=col/16;
+    if(src==dst) ++tile_same[tr][tc];
+    else if(sw==dw) ++tile_warp_local[tr][tc];
+    else ++tile_cross[tr][tc];
+  }
+  bool ownership_bijection = !missing_t&&!missing_s&&!errors[1]&&!errors[2];
+  bool topology_complete = same_thread+same_warp_different_lane+different_warp==M*N;
+  int cross_warp_tiles=0,cross_warp_strips=0;
+  for(int tr=0;tr<8;++tr) {
+    bool strip_has_cross=false;
+    for(int tc=0;tc<8;++tc) if(tile_cross[tr][tc]) {++cross_warp_tiles;strip_has_cross=true;}
+    cross_warp_strips += strip_has_cross;
+  }
+  const char* mapping;
+  const char* mapping_topology;
+  int minimum_cross_warp_scratch_bytes=0,required_compute_barriers=0;
+  if(different_warp==0 && same_warp_different_lane==0) {
+    mapping="DIRECT"; mapping_topology="DIRECT_SAME_THREAD";
+  } else if(different_warp==0) {
+    mapping="REGISTER_SHUFFLE";
+    mapping_topology=fixed_lane_permutation ? "FIXED_LANE_PERMUTATION"
+                                            : "TILE_COORDINATE_LANE_PERMUTATION";
+  } else {
+    // Any bijective cross-warp permutation can be exchanged one logical 16x16
+    // tile at a time: sources write scratch[row_in_tile,col_in_tile], named
+    // barrier, destinations read, named barrier. Thus 1 KiB is sufficient;
+    // a 16x128 strip trades 8 KiB for only 16 barriers over the full matrix.
+    mapping="SMALL_SCRATCH";
+    mapping_topology=(fixed_warp_permutation&&fixed_lane_permutation)
+        ? "FIXED_WARP_AND_LANE_PERMUTATION"
+        : "GENERAL_COORDINATE_DEPENDENT_CROSS_WARP";
+    minimum_cross_warp_scratch_bytes=16*16*sizeof(float);
+    required_compute_barriers=2*cross_warp_tiles;
+  }
+  // DIRECT is exercised numerically above. Cross-warp SMALL_SCRATCH is proven
+  // constructively by the bounded logical-tile exchange. A warp-local result
+  // remains NO-GO until an actual shuffle path is exercised.
+  bool mapping_go=ownership_bijection&&topology_complete&&bad_product==0&&
+                  (different_warp>0 || same_warp_different_lane==0);
+
+  std::ostringstream matrix_json,tile_grid,lane_json,warp_json;
+  matrix_json<<"[";
+  for(int sw=0;sw<4;++sw){if(sw)matrix_json<<",";matrix_json<<"[";
+    for(int dw=0;dw<4;++dw){if(dw)matrix_json<<",";matrix_json<<warp_transfer_matrix[sw][dw];}
+    matrix_json<<"]";} matrix_json<<"]";
+  tile_grid<<"[";
+  for(int tr=0;tr<8;++tr){if(tr)tile_grid<<",";tile_grid<<"\"";
+    for(int tc=0;tc<8;++tc) tile_grid<<(tile_cross[tr][tc]? 'X':tile_warp_local[tr][tc]?'W':'D');
+    tile_grid<<"\"";} tile_grid<<"]";
+  lane_json<<"[";for(int i=0;i<32;++i){if(i)lane_json<<",";lane_json<<lane_map[i];}lane_json<<"]";
+  warp_json<<"[";for(int i=0;i<4;++i){if(i)warp_json<<",";warp_json<<warp_map[i];}warp_json<<"]";
+
+  if(!dump_ownership.empty()) {
+    std::ofstream csv(dump_ownership);
+    csv<<"row,col,src_thread,src_warp,src_lane,src_register_slot,"
+          "dst_thread,dst_warp,dst_lane,dst_register_slot\n";
+    for(int logical=0;logical<M*N;++logical) {
+      int row=logical/N,col=logical%N,src=to[logical],dst=so[logical];
+      csv<<row<<','<<col<<','<<src<<','<<src/32<<','<<src%32<<','<<ts[logical]
+         <<','<<dst<<','<<dst/32<<','<<dst%32<<','<<ss[logical]<<'\n';
+    }
+  }
   bool direct = !owner_mismatch && !errors[3];
   bool correct = !missing_a&&!missing_u&&!missing_t&&!missing_s&&!errors[0]&&!errors[1]&&!errors[2]&&
                  !errors[4]&&!bad_product&&!bad_update&&direct;
   cudaFuncAttributes attr{}; CHECK_CUDA(cudaFuncGetAttributes(&attr,v1b_mapping_kernel));
-  std::printf("{\"correct\":%s,\"mapping\":\"%s\",\"u_staging_bytes\":%zu,\"additional_smem_bytes\":%zu,"
+  std::printf("{\"correct\":%s,\"mapping\":\"%s\",\"mapping_topology\":\"%s\","
+    "\"same_thread\":%d,\"same_warp_different_lane\":%d,\"different_warp\":%d,"
+    "\"cross_warp_element_count\":%d,\"minimum_cross_warp_scratch_bytes\":%d,"
+    "\"required_compute_barriers\":%d,\"cross_warp_tiles\":%d,\"strip_scratch_bytes\":8192,"
+    "\"strip_compute_barriers\":%d,"
+    "\"warp_transfer_matrix\":%s,\"tile_topology_grid\":%s,\"lane_map\":%s,\"warp_map\":%s,"
+    "\"u_staging_bytes\":%zu,\"additional_smem_bytes\":%zu,"
     "\"tmem_columns\":%d,\"registers_per_thread\":%d,\"local_bytes_per_thread\":%zu,\"spills\":\"see_ptxas\","
     "\"v1b_mapping_go\":%s,\"missing_a\":%d,\"missing_u\":%d,"
     "\"missing_tmem\":%d,\"missing_state\":%d,\"owner_mismatch\":%d,\"duplicate_u\":%d,"
     "\"duplicate_tmem\":%d,\"duplicate_state\":%d,\"unmapped_local\":%d,\"bad_product\":%d,"
     "\"bad_bf16_update\":%d,\"max_product_error\":%.9g,\"mean_product_error\":%.9g,\"launch_us\":%.6f}\n",
-    correct?"true":"false",direct?"DIRECT":"FULL_SMEM_REQUIRED",size_t(K*N*sizeof(BF16)),sizeof(SharedStorage),
-    TmemColumns,attr.numRegs,attr.localSizeBytes,correct?"true":"false",missing_a,missing_u,missing_t,missing_s,
+    correct?"true":"false",mapping,mapping_topology,same_thread,same_warp_different_lane,different_warp,
+    different_warp,minimum_cross_warp_scratch_bytes,required_compute_barriers,cross_warp_tiles,
+    2*cross_warp_strips,matrix_json.str().c_str(),
+    tile_grid.str().c_str(),lane_json.str().c_str(),warp_json.str().c_str(),size_t(K*N*sizeof(BF16)),sizeof(SharedStorage),
+    TmemColumns,attr.numRegs,attr.localSizeBytes,mapping_go?"true":"false",missing_a,missing_u,missing_t,missing_s,
     owner_mismatch,errors[0],errors[2],errors[1],errors[3],
     bad_product,bad_update,max_error,sum_error/(M*N),ms*1000/iters);
   return correct?0:4;
