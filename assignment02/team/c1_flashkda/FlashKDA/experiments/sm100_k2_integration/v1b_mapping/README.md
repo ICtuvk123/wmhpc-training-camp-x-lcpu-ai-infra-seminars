@@ -45,12 +45,12 @@ same-thread, warp-local, and cross-warp ownership respectively. The optional
 CSV contains the source and destination thread, warp, lane, and register slot
 for every logical `(row,col)`.
 
-Cross-warp permutations are classified as `SMALL_SCRATCH`, since an arbitrary
-bijection can be realized with a 1,024-byte FP32 16x16 tile and two named
-compute barriers per tile. The output also reports the 8,192-byte 16x128 strip
-alternative, which needs 16 barriers for the full matrix. This is a mapping
-feasibility result; the probe's 255-register diagnostic latency is not a
-production performance result.
+The probe can classify a cross-warp permutation as theoretically realizable
+with `SMALL_SCRATCH`: either a 1,024-byte FP32 16x16 tile with two named
+compute barriers per tile, or an 8,192-byte 16x128 strip with 16 barriers for
+the full matrix. No redistribution kernel is implemented. This is only a
+mapping feasibility bound; the probe's 255-register diagnostic latency is not
+a production performance result.
 
 Before the numerical probe, the executable performs a host/static topology
 sweep over the legal non-packed FP32 TMEM load families exposed by CUTLASS:
@@ -72,3 +72,42 @@ records, so `local_bytes_per_thread` is reported as `-1`.
 
 The final topology decision is `REGISTER_SHUFFLE_CANDIDATE`,
 `MATERIALLY_REDUCED_CROSS_WARP`, or `ALL_TO_ALL_CROSS_WARP_INTRINSIC`.
+
+## B300 result and decision
+
+All 18 legal candidates compiled and produced complete, duplicate-free maps.
+Every candidate retained exactly 12,288 cross-warp elements out of 16,384
+(75%). Every candidate also produced the same warp transfer matrix:
+
+```text
+[
+  [1024, 1024, 1024, 1024],
+  [1024, 1024, 1024, 1024],
+  [1024, 1024, 1024, 1024],
+  [1024, 1024, 1024, 1024]
+]
+```
+
+`SM100_TMEM_LOAD_16dp256b1x` increased same-thread ownership from 128 to 512,
+but did not reduce cross-warp ownership. The copy atom changes only the
+within-warp portion of the permutation; none of the available legal TMEM LOAD
+mappings changes the uniform four-warp all-to-all topology.
+
+The arithmetic probe remains exact (`bad_product=0`, maximum and mean product
+error both zero), so the failure is ownership compatibility rather than the
+tcgen05 product.
+
+Decision:
+
+```text
+Hybrid V1b (V1a ownership + tcgen05 Phase 6): NO-GO
+Direct mapping:                              NO-GO
+Register-shuffle-only mapping:               NO-GO
+SMALL_SCRATCH production implementation:     STOPPED / NOT IMPLEMENTED
+```
+
+A bounded scratch exchange is theoretically possible, but would add a
+four-warp redistribution and repeated named barriers to every recurrence
+chunk. Existing V1a gains are too small to justify that production experiment.
+Production remains on the validated adaptive baseline/V1a policy; no UseV1B
+specialization or dispatch entry is added.
