@@ -129,3 +129,32 @@ boundary movement**. If it is substantially smaller, inspect the generated
 V1a prologue/epilogue and the scheduling effect of its 137-register live state
 as **D: another fixed kernel cost**. The fitted negative per-chunk delta rules
 out **C: per-chunk overhead** for this sweep.
+
+## Production-shaped V1aE
+
+The compile-time-only V1aE specialization keeps the complete V1a recurrence
+and changes only final egress. After the chunk loop, compute threads stage the
+persistent fragments into 32 KiB BF16 SMEM, all 192 threads synchronize once,
+and the production STORE warp issues the existing state TMA store. It has no
+runtime selector or auto-dispatch entry.
+
+Build with both `FLASH_KDA_ENABLE_V1A=1` and
+`FLASH_KDA_ENABLE_V1A_EGRESS_EXPERIMENTS=1`, then link
+`v1a_overhead/k2_compare_v1ae.cu`. Run B=4 with token counts
+512, 1024, 1536, 2048, 3072, and 4096 to reproduce the 32-256 chunk ladder.
+
+```bash
+nvcc -std=c++17 -O3 -lineinfo -arch=sm_103a \
+  --expt-relaxed-constexpr --expt-extended-lambda --use_fast_math \
+  --ptxas-options=-v,--register-usage-level=10,--warn-on-spills \
+  -DFLASH_KDA_ENABLE_V1A=1 -DFLASH_KDA_ENABLE_V1A_EGRESS_EXPERIMENTS=1 \
+  -Icutlass/include -Icsrc -c csrc/smxx/fwd_launch.cu \
+  -o experiments/sm100_k2_integration/v1a_overhead/build/fwd_v1ae.o
+
+nvcc -std=c++17 -O3 -lineinfo -arch=sm_103a \
+  --expt-relaxed-constexpr --expt-extended-lambda \
+  -Icutlass/include -Icsrc \
+  experiments/sm100_k2_integration/v1a_overhead/k2_compare_v1ae.cu \
+  experiments/sm100_k2_integration/v1a_overhead/build/fwd_v1ae.o \
+  -o experiments/sm100_k2_integration/v1a_overhead/build/k2_compare_v1ae
+```

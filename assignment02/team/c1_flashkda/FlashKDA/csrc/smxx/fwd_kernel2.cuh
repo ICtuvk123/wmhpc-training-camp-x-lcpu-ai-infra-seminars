@@ -150,15 +150,26 @@ struct SharedStorageK2V1A {
     typename cutlass::PipelineAsync<OutputStages>::SharedStorage store_pipeline;
 };
 
-template <class Layouts, int InputStages, int OutputStages, bool UseSM100V0, bool UseV1A>
+// Experimental V1a epilogue only: the recurrent state remains in registers.
+template <class Layouts, int InputStages, int OutputStages>
+struct SharedStorageK2V1AE : SharedStorageK2V1A<Layouts, InputStages, OutputStages> {
+    using BF16 = cutlass::bfloat16_t;
+    using StateSmemLayout = typename Layouts::StateSmemLayout;
+    alignas(128) cute::ArrayEngine<BF16, cute::cosize_v<StateSmemLayout>> final_state;
+};
+
+template <class Layouts, int InputStages, int OutputStages, bool UseSM100V0, bool UseV1A,
+          int V1AEgress = 0>
 using SelectedSharedStorageK2 =
 #if defined(FLASH_KDA_ENABLE_SM100_V0)
-    cute::conditional_t<UseV1A, SharedStorageK2V1A<Layouts, InputStages, OutputStages>,
+    cute::conditional_t<(V1AEgress != 0), SharedStorageK2V1AE<Layouts, InputStages, OutputStages>,
+      cute::conditional_t<UseV1A, SharedStorageK2V1A<Layouts, InputStages, OutputStages>,
       cute::conditional_t<UseSM100V0, SharedStorageK2SM100V0<Layouts, InputStages, OutputStages>,
-                          SharedStorageK2<Layouts, InputStages, OutputStages>>>;
+                          SharedStorageK2<Layouts, InputStages, OutputStages>>>>;
 #else
-    cute::conditional_t<UseV1A, SharedStorageK2V1A<Layouts, InputStages, OutputStages>,
-                        SharedStorageK2<Layouts, InputStages, OutputStages>>;
+    cute::conditional_t<(V1AEgress != 0), SharedStorageK2V1AE<Layouts, InputStages, OutputStages>,
+      cute::conditional_t<UseV1A, SharedStorageK2V1A<Layouts, InputStages, OutputStages>,
+                          SharedStorageK2<Layouts, InputStages, OutputStages>>>;
 #endif
 
 template <
@@ -179,7 +190,8 @@ template <
     bool StateFP32 = false,
     bool IsVarlen = true,
     bool UseSM100V0 = false,
-    bool UseV1A = false
+    bool UseV1A = false,
+    int V1AEgress = 0
 >
 __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
     CUTE_GRID_CONSTANT TmaLoadV const tma_load_v,
@@ -206,10 +218,12 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
     static_assert(!UseSM100V0, "Rebuild with FLASH_KDA_ENABLE_SM100_V0=1 for the experimental path");
 #endif
     static_assert(!UseSM100V0 || (D == 128 && CHUNK == 16), "V0 supports D=128, CHUNK=16");
-    static_assert(!UseV1A || (D == 128 && CHUNK == 16 && HasStateIn && HasStateOut &&
+    constexpr bool UseRegisterState = UseV1A || V1AEgress != 0;
+    static_assert(!UseRegisterState || (D == 128 && CHUNK == 16 && HasStateIn && HasStateOut &&
                               !StateFP32 && !IsVarlen),
                   "V1a supports fixed-length BF16 state input/output only");
-    static_assert(!(UseSM100V0 && UseV1A), "V0 and V1a are mutually exclusive");
+    static_assert(!(UseSM100V0 && UseRegisterState), "V0 and V1a are mutually exclusive");
+    static_assert(V1AEgress == 0 || V1AEgress == 1, "unknown V1a egress experiment");
     using BF16 = cutlass::bfloat16_t;
     using FP16 = cutlass::half_t;
     using Layouts = K2Layouts<D, CHUNK>;
@@ -243,7 +257,8 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
 
     // --- shared memory
     extern __shared__ __align__(128) unsigned char shared_mem[];
-    using SharedStorageT = SelectedSharedStorageK2<Layouts, InputStages, OutputStages, UseSM100V0, UseV1A>;
+    using SharedStorageT = SelectedSharedStorageK2<Layouts, InputStages, OutputStages,
+                                                   UseSM100V0, UseV1A, V1AEgress>;
     SharedStorageT& shared_storage = *reinterpret_cast<SharedStorageT*>(shared_mem);
 
     // --- warp specialization
@@ -299,7 +314,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
 
     // --- Load initial state
 #ifndef TMA_DISABLE_ALL
-    if constexpr (UseV1A) {
+    if constexpr (UseRegisterState) {
         // V1a loads state directly into compute-thread registers below.
     } else if constexpr (HasStateIn && !StateFP32) {
         // BF16 state: TMA load directly into state_acc
@@ -510,7 +525,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
                                      make_layout(make_shape(Int<16>{}, Int<16>{}), LayoutRight{}));
         using PersistentBFrag = decltype(state_thr.partition_fragment_B(state_ref));
         PersistentBFrag state_regs[2][8];
-        if constexpr (UseV1A) {
+        if constexpr (UseRegisterState) {
             auto state_ptr = static_cast<BF16 const*>(initial_state_raw_ptr) +
                              size_t(seq_idx * H + head_idx) * D * D;
             const int state_warp = compute_tid / 32;
@@ -558,7 +573,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
             Tensor Mqk = make_tensor(make_smem_ptr(shared_storage.input[load_stage].Mqk.begin()), LMLayout{});
 
             BF16* canonical_state_ptr;
-            if constexpr (UseV1A) canonical_state_ptr = shared_storage.input[load_stage].v.begin();
+            if constexpr (UseRegisterState) canonical_state_ptr = shared_storage.input[load_stage].v.begin();
             else canonical_state_ptr = shared_storage.state_acc.begin();
             Tensor s_acc = make_tensor(make_smem_ptr(canonical_state_ptr), StateSmemLayout{});
             Tensor s_acc_T = make_tensor(make_smem_ptr(canonical_state_ptr), TransposedStateSmemLayout{});
@@ -643,7 +658,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
                 local_tile(k_decayed, make_shape(Int<16>{}, Int<16>{}), make_coord(0, 0))), tCrAi_k_view);
             copy(smem_tiled_copy_A, smem_thr_copy_A.partition_S(
                 local_tile(q_decayed, make_shape(Int<16>{}, Int<16>{}), make_coord(0, 0))), tCrAi_q_view);
-            if constexpr (!UseV1A) {
+            if constexpr (!UseRegisterState) {
                 copy(smem_tiled_copy_B, smem_thr_copy_B.partition_S(
                     local_tile(s_acc, make_shape(Int<16>{}, Int<16>{}), make_coord(warp_id * 2, 0))), tCrBi_view);
             }
@@ -652,7 +667,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
             for (int k = 0; k < K_BLOCKS; ++k) {
                 cute::transform(tCrAi_k, tCrA_k, cute::identity{});
                 cute::transform(tCrAi_q, tCrA_q, cute::identity{});
-                if constexpr (UseV1A) {
+                if constexpr (UseRegisterState) {
                     gemm(thr_mma, tCrA_k(_,_,Int<0>{}), state_regs[0][k](_,_,Int<0>{}), u_acc[0]);
                     gemm(thr_mma, tCrA_q(_,_,Int<0>{}), state_regs[0][k](_,_,Int<0>{}), out_acc[0]);
                     gemm(thr_mma, tCrA_k(_,_,Int<0>{}), state_regs[1][k](_,_,Int<0>{}), u_acc[1]);
@@ -673,7 +688,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
                         local_tile(k_decayed, make_shape(Int<16>{}, Int<16>{}), make_coord(0, k + 1))), tCrAi_k_view);
                     copy(smem_tiled_copy_A, smem_thr_copy_A.partition_S(
                         local_tile(q_decayed, make_shape(Int<16>{}, Int<16>{}), make_coord(0, k + 1))), tCrAi_q_view);
-                    if constexpr (!UseV1A) {
+                    if constexpr (!UseRegisterState) {
                         copy(smem_tiled_copy_B, smem_thr_copy_B.partition_S(
                             local_tile(s_acc, make_shape(Int<16>{}, Int<16>{}), make_coord(warp_id * 2, k + 1))), tCrBi_view);
                     }
@@ -770,7 +785,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
             }
 
             // ======== Phase 6: s_acc update ========
-            if constexpr (UseV1A) {
+            if constexpr (UseRegisterState) {
                 constexpr int S_M_BLOCKS = 8;
                 Tensor tCrAi_kr = make_fragment_like<BF16>(thr_mma.partition_fragment_A(A_ref));
                 auto tCrAi_kr_view = smem_thr_copy_A_T.retile_D(tCrAi_kr);
@@ -914,7 +929,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
             flash_kda_sm100_v0::release(shared_storage.sm100_v0, threadIdx.x, compute_barrier);
         }
 #endif
-        if constexpr (UseV1A) {
+        if constexpr (UseRegisterState && V1AEgress == 0) {
             auto state_ptr = static_cast<BF16*>(final_state_raw_ptr) +
                              size_t(seq_idx * H + head_idx) * D * D;
             const int state_warp = compute_tid / 32;
@@ -929,6 +944,24 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
                         int key = kb * 16 + int(get<1>(coord));
                         int value = (state_warp * 2 + bi) * 16 + int(get<0>(coord));
                         state_ptr[value * D + key] = state_regs[bi][kb](i);
+                    }
+                }
+            }
+        } else if constexpr (V1AEgress == 1) {
+            Tensor s_final = make_tensor(
+                make_smem_ptr(shared_storage.final_state.begin()), StateSmemLayout{});
+            const int state_warp = compute_tid / 32;
+#pragma unroll
+            for (int bi = 0; bi < 2; ++bi) {
+#pragma unroll
+                for (int kb = 0; kb < 8; ++kb) {
+                    auto coords = state_thr.partition_B(state_identity);
+#pragma unroll
+                    for (int i = 0; i < size(state_regs[bi][kb]); ++i) {
+                        auto coord = coords(i);
+                        int key = kb * 16 + int(get<1>(coord));
+                        int value = (state_warp * 2 + bi) * 16 + int(get<0>(coord));
+                        s_final(value, key) = state_regs[bi][kb](i);
                     }
                 }
             }
@@ -976,7 +1009,7 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
             ++out_read;
         }
 
-        if constexpr (HasStateOut && !StateFP32 && !UseV1A) {
+        if constexpr (HasStateOut && !StateFP32 && !UseRegisterState) {
             // BF16 state: TMA store directly from state_acc
             Tensor g_final = tma_store_final_state.get_tma_tensor(make_shape(N * H, D, D));
             auto state_off = g_final.layout()(seq_idx * H + head_idx, 0, 0);
@@ -990,6 +1023,26 @@ __global__ void __launch_bounds__(NumThreads) _flash_kda_fwd_recurrence(
                 cta_tma_store_state.partition_S(s_state),
                 cta_tma_store_state.partition_D(g_final_tile)
             );
+            tma_store_arrive();
+        }
+    }
+
+    if constexpr (V1AEgress == 1) {
+        // The STORE warp has drained the normal output pipeline before this
+        // one-time recurrence epilogue rendezvous.
+        cutlass::arch::fence_view_async_shared();
+        __syncthreads();
+        if (warp_role == WarpRole::STORE && lane_predicate) {
+            Tensor g_final = tma_store_final_state.get_tma_tensor(make_shape(N * H, D, D));
+            auto state_off = g_final.layout()(seq_idx * H + head_idx, 0, 0);
+            Tensor g_final_tile = make_tensor(g_final.data() + state_off,
+                make_layout(make_shape(Int<1>{}, Int<D>{}, Int<D>{}), stride(g_final.layout())));
+            Tensor s_final = make_tensor(
+                make_smem_ptr(shared_storage.final_state.begin()), TMAStateSmemLayout{});
+            auto cta_tma_store_state = tma_store_final_state.get_slice(Int<0>{});
+            cute::copy(tma_store_final_state,
+                       cta_tma_store_state.partition_S(s_final),
+                       cta_tma_store_state.partition_D(g_final_tile));
             tma_store_arrive();
         }
     }
