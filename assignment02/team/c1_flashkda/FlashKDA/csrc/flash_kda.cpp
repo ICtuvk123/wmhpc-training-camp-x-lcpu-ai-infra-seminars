@@ -118,7 +118,7 @@ void fwd(
     const std::string k2_impl_name = requested_k2 ? requested_k2 : "baseline";
     const auto k2_mode = flash_kda::parse_k2_mode(k2_impl_name);
     TORCH_CHECK(k2_mode != flash_kda::K2Mode::Invalid,
-                "FLASH_KDA_K2_IMPL must be auto, baseline, sm100_v0, or v1a");
+                "FLASH_KDA_K2_IMPL must be auto, baseline, sm100_v0, v1a, or v1ae");
 
     // Flatten [B, T, H, D] -> [B*T, H, D] (contiguous, same data pointer)
     auto q_3d = q.reshape({T_total, H, D});
@@ -187,6 +187,9 @@ void fwd(
 #if defined(FLASH_KDA_ENABLE_V1A)
     k2_config.v1a_compiled = true;
 #endif
+#if defined(FLASH_KDA_ENABLE_V1AE)
+    k2_config.v1ae_compiled = true;
+#endif
     k2_config.compute_major = compute_major;
     k2_config.compute_minor = compute_minor;
     k2_config.is_varlen = is_varlen;
@@ -195,6 +198,7 @@ void fwd(
     k2_config.state_fp32 = state_fp32;
     k2_config.total_tokens = T_total;
     k2_config.sequences = N_val;
+    k2_config.heads = H;
 
     const auto k2_implementation =
         flash_kda::select_k2_implementation(k2_mode, k2_config);
@@ -204,6 +208,12 @@ void fwd(
                         "Rebuild with FLASH_KDA_ENABLE_SM100_V0=1 to enable sm100_v0");
             TORCH_CHECK(false,
                         "sm100_v0 requires SM100/SM103; use baseline on other architectures");
+        }
+        if (k2_mode == flash_kda::K2Mode::V1AE) {
+            TORCH_CHECK(k2_config.v1ae_compiled,
+                        "Rebuild with FLASH_KDA_ENABLE_V1AE=1 to enable v1ae");
+            TORCH_CHECK(false,
+                        "v1ae requires SM103 and fixed-length BF16 initial_state and final_state");
         }
         TORCH_CHECK(k2_config.v1a_compiled,
                     "Rebuild with FLASH_KDA_ENABLE_V1A=1 to enable v1a");
@@ -270,7 +280,15 @@ void fwd(
             LAUNCH(true, false, false, VL); \
         }
 
-    if (use_v1a) {
+    if (k2_implementation == flash_kda::K2Implementation::V1AE) {
+#if defined(FLASH_KDA_ENABLE_V1AE)
+        launch_fwd<128, true, true, false, false, false, false, 1>(
+            q_ptr, k_ptr, v_ptr, g_ptr, beta_t_ptr,
+            initial_state_raw, scale_f, final_state_raw, out_ptr,
+            workspace_ptr, total_tiles, int(T_total), int(H), int(N_val),
+            cu_seqlens_dev, A_log_ptr, dt_bias_ptr, gate_scale, stream);
+#endif
+    } else if (use_v1a) {
 #if defined(FLASH_KDA_ENABLE_V1A)
         LAUNCH_IMPL(true, true, false, false, false, true);
 #endif

@@ -12,10 +12,10 @@ import sys
 
 WORKLOADS = {
     "b1_t8192": (1, 8192, "v1a"),
-    "b4_t2048": (4, 2048, "v1a"),
-    "b8_t1024": (8, 1024, "baseline"),
+    "b4_t2048": (4, 2048, "v1ae"),
+    "b8_t1024": (8, 1024, "v1ae"),
 }
-MODES = ("baseline", "v1a", "auto")
+MODES = ("baseline", "v1a", "v1ae", "auto")
 HEADS = 64
 DIM = 128
 CHUNK = 16

@@ -68,7 +68,8 @@ ext_modules = [
         extra_compile_args={
             'cxx': ['-O3', '-Wno-psabi', *(['-DFLASH_KDA_ENABLE_SM100_V0=1']
                                          if is_flag_set('FLASH_KDA_ENABLE_SM100_V0') else []),
-                    *(['-DFLASH_KDA_ENABLE_V1A=1'] if is_flag_set('FLASH_KDA_ENABLE_V1A') else [])],
+                    *(['-DFLASH_KDA_ENABLE_V1A=1'] if is_flag_set('FLASH_KDA_ENABLE_V1A') else []),
+                    *(['-DFLASH_KDA_ENABLE_V1AE=1'] if is_flag_set('FLASH_KDA_ENABLE_V1AE') else [])],
             'nvcc': [
                 '-O3',
                 '-U__CUDA_NO_HALF_OPERATORS__',
@@ -84,6 +85,7 @@ ext_modules = [
                 *get_arch_flags(),
                 *(['-DFLASH_KDA_ENABLE_SM100_V0=1'] if is_flag_set('FLASH_KDA_ENABLE_SM100_V0') else []),
                 *(['-DFLASH_KDA_ENABLE_V1A=1'] if is_flag_set('FLASH_KDA_ENABLE_V1A') else []),
+                *(['-DFLASH_KDA_ENABLE_V1AE=1'] if is_flag_set('FLASH_KDA_ENABLE_V1AE') else []),
             ],
         },
     )

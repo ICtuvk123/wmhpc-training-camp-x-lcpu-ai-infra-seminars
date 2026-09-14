@@ -253,7 +253,7 @@ INSTANTIATE_STATE_VARIANTS(false, true)
 #endif
 #if defined(FLASH_KDA_ENABLE_V1A)
 INSTANTIATE_LAUNCH_FWD(128, true, true, false, false, false, true, 0)
-#if defined(FLASH_KDA_ENABLE_V1A_EGRESS_EXPERIMENTS)
-INSTANTIATE_LAUNCH_FWD(128, true, true, false, false, false, false, 1)
 #endif
+#if defined(FLASH_KDA_ENABLE_V1AE) || (defined(FLASH_KDA_ENABLE_V1A) && defined(FLASH_KDA_ENABLE_V1A_EGRESS_EXPERIMENTS))
+INSTANTIATE_LAUNCH_FWD(128, true, true, false, false, false, false, 1)
 #endif

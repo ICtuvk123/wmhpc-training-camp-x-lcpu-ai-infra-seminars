@@ -1,5 +1,48 @@
 # Production K2: opt-in Phase-6 V0 and isolated Phase-1 probe
 
+## Supported explicit V1aE selection
+
+Build with `FLASH_KDA_ENABLE_V1AE=1` to include the existing staged-egress
+specialization in the public API. Select it using `FLASH_KDA_K2_IMPL=v1ae`.
+It requires SM103, fixed-length execution, and BF16 initial and final state.
+`FLASH_KDA_ENABLE_V1A=1` independently enables frozen direct-egress V1a.
+The unset runtime selector still defaults to baseline.
+
+```bash
+FLASH_KDA_ENABLE_V1A=1 FLASH_KDA_ENABLE_V1AE=1 FLASH_KDA_CUDA_ARCHS=103a pip install -v --no-build-isolation .
+```
+
+The legacy `FLASH_KDA_ENABLE_V1A_EGRESS_EXPERIMENTS` launcher build remains
+available for the existing C++ comparators. Public `v1ae` selection uses the
+supported `FLASH_KDA_ENABLE_V1AE` flag.
+
+## B300 H=64 auto policy
+
+This is an empirical SM103 specialization for fixed-length BF16 initial and
+final state. Chunks are `(T_total / sequences) / 16`, not `T_total / 16`.
+
+| Batch | Baseline interval | V1aE interval | V1a interval |
+| --- | --- | --- | --- |
+| 1 | <80 | 80–159 | >=160 |
+| 2 | <32 | 32–95 | >=96 |
+| 3 | <24 | 24–319 | >=320 |
+| 4 | <32 | 32–255 | >=256 |
+| 5–7 | <24 | 24–320 inclusive | >320 (unmeasured fallback) |
+| 8 | <24 or >=320 | 24–319 | never |
+| >8 | all | never | never |
+
+B3 and B5–B7 below 24 use a conservative lower fallback. B5–B7 have **no
+measured V1aE-to-V1a crossover through 320**: V1aE wins at every sampled point
+from 24 through 320. Their >320 V1a selection is an explicitly unvalidated
+conservative fallback. B>8 is unmeasured and stays on baseline. The intervals
+encode the production policy between sampled points, not measurements at
+every chunk count; this is not a universal grid-only law.
+
+H!=64 retains the previous conservative rule: supported V1a at >=128 chunks,
+otherwise baseline. Each selected implementation must be compiled and supported;
+otherwise auto uses baseline. Auto never selects V0. Explicit `v1a` and `v1ae`
+remain available on supported calls outside the measured auto intervals.
+
 Status: compiled and host layout checks passed; target GPU correctness and
 timing are pending. P0-P3 in `experiments/sm100_phase6` are unchanged.
 
@@ -265,22 +308,22 @@ recurrence ladder passed after this fix.
 
 ## Production K2 dispatch
 
-`FLASH_KDA_K2_IMPL` accepts `baseline`, `sm100_v0`, `v1a`, and `auto`. If the
+`FLASH_KDA_K2_IMPL` accepts `baseline`, `sm100_v0`, `v1a`, `v1ae`, and `auto`. If the
 variable is unset, the established `baseline` default is preserved. `sm100_v0`
 remains an explicit experiment and is never selected by `auto`.
 
 `v1a` forces the V1a specialization when it was compiled and the call uses an
-SM103 device, fixed-length execution, and BF16 initial and final state. `auto`
-uses the same support checks and additionally requires at least 128 chunks per
-sequence. With a 16-token chunk, the fixed-length condition is:
+SM103 device, fixed-length execution, and BF16 initial and final state. `v1ae`
+forces the staged-egress specialization under the same configuration checks
+and its own compilation flag. `auto` uses the H=64 policy table above, or the
+128-chunk conservative rule for H!=64. Chunk counts are calculated as:
 
 ```text
 sequence_length = T_total / N
 chunks_per_sequence = sequence_length / 16
-chunks_per_sequence >= 128
 ```
 
-Unsupported `auto` calls fall back to baseline. Unsupported explicit `v1a` or
+Unsupported `auto` calls fall back to baseline. Unsupported explicit `v1a`, `v1ae`, or
 `sm100_v0` requests report an error instead of silently changing the requested
 implementation. Varlen calls always use baseline under `auto`.
 
@@ -297,19 +340,21 @@ experiments/sm100_k2_integration/build/test_k2_dispatch
 
 `benchmark_production_dispatch.py` measures the full public `flash_kda.fwd`
 path for B1/T8192, B4/T2048, and B8/T1024 with H=64 and D=128. It launches
-baseline, V1a, and auto in separate processes, uses identical deterministic
+baseline, V1a, V1aE, and auto in separate processes, uses identical deterministic
 inputs, and requires bitwise-equal output and final state before reporting the
 mean and median CUDA-event latency.
 
 Build the SM103a extension and run the final B300 acceptance benchmark:
 
 ```bash
-FLASH_KDA_ENABLE_V1A=1 FLASH_KDA_CUDA_ARCHS=103a \
+FLASH_KDA_ENABLE_V1A=1 FLASH_KDA_ENABLE_V1AE=1 FLASH_KDA_CUDA_ARCHS=103a \
   python setup.py build_ext --inplace --force
 
 python experiments/sm100_k2_integration/benchmark_production_dispatch.py \
   --warmup 30 --iters 200
 ```
 
-The expected auto choices are V1a for B1/T8192 (512 chunks) and B4/T2048
-(128 chunks), and baseline for B8/T1024 (64 chunks).
+With both implementations compiled, expected auto choices are V1a for
+B1/T8192 (512 chunks), V1aE for B4/T2048 (128 chunks), and V1aE for
+B8/T1024 (64 chunks). The benchmark is retained for reproduction; no new
+performance sweep is needed for this dispatch-only change.
